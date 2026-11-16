@@ -1,0 +1,66 @@
+{
+  "release": "d1_stair_nav_phase3_orin_scan_axisfix_20261116",
+  "target": {
+    "architecture": "aarch64",
+    "os": "Ubuntu 22.04 / ROS 2 Humble"
+  },
+  "format": "UTF-8 without BOM; LF line endings; Linux archive permissions",
+  "text_files_checked": 104,
+  "python_files_syntax_checked": 33,
+  "browser_checks": {
+    "checks": [
+      {
+        "name": "script initialized",
+        "passed": true
+      },
+      {
+        "name": "Chinese status rendered",
+        "passed": true
+      },
+      {
+        "name": "Chinese labels intact",
+        "passed": true
+      },
+      {
+        "name": "position rendered",
+        "passed": true
+      },
+      {
+        "name": "scan time aligned",
+        "passed": true
+      },
+      {
+        "name": "map and obstacle drawing ran",
+        "passed": true
+      },
+      {
+        "name": "disconnect hides live scan",
+        "passed": true
+      },
+      {
+        "name": "disconnect text",
+        "passed": true
+      },
+      {
+        "name": "odometry-only status",
+        "passed": true
+      },
+      {
+        "name": "upper floor is background only",
+        "passed": true
+      },
+      {
+        "name": "no browser runtime errors",
+        "passed": true
+      }
+    ],
+    "errors": []
+  },
+  "map_identity_sha256": "PASS",
+  "source_and_control_parameters": "unchanged except text line endings",
+  "scan_axis_fix": "restored raw cloud axes; applies measured FAST-LIO Y-up to nav Z-up conversion; direct cloud-to-body calibration preserved",
+  "old_build_and_runtime_cache": "excluded",
+  "sdk_aarch64_elf": "PASS",
+  "orin_build_and_full_unit_suite": "NOT RUN: transfer to the Orin temporary directory was not approved",
+  "hardware_validation": "not performed"
+}

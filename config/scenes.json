@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "default": "old",
+  "scenes": {
+    "old": {
+      "label": "Old scene (retained)",
+      "map_id": "retained_762696f627ffad5e",
+      "visual_map": "assets/output/demo/visual_map.npz",
+      "maps": {
+        "lower": {
+          "yaml": "maps/lower.yaml",
+          "image": "maps/lower.pgm"
+        },
+        "upper": {
+          "yaml": "maps/upper.yaml",
+          "image": "maps/upper.pgm"
+        }
+      },
+      "entry": {
+        "x": 1.9245870099355233,
+        "y": -0.3280606512601746,
+        "z": 0.01784590223839,
+        "yaw": 0.09440958379120414,
+        "frame": "map"
+      },
+      "navigation_enabled": true
+    },
+    "front_A": {
+      "label": "New scene (front_A_20261113_205139)",
+      "map_id": "front_A_20261113_205139",
+      "visual_map": "assets/scenes/front_A_20261113_205139/visual_map.npz",
+      "maps": {
+        "lower": {
+          "yaml": "assets/scenes/front_A_20261113_205139/maps/lower.yaml",
+          "image": "assets/scenes/front_A_20261113_205139/maps/lower.pgm"
+        },
+        "upper": {
+          "yaml": "assets/scenes/front_A_20261113_205139/maps/upper.yaml",
+          "image": "assets/scenes/front_A_20261113_205139/maps/upper.pgm"
+        }
+      },
+      "entry": null,
+      "navigation_enabled": false,
+      "note": "Visual bank and 2D maps added; stair entry pose still requires field validation."
+    }
+  }
+}

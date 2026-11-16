@@ -1,0 +1,7 @@
+FAST_LIO_Hesai
+来源: https://github.com/HesaiTechnology-Spatial-Perception/FAST_LIO_Hesai.git
+分支来源: ROS2
+提交: 2783882405484c0c852eaffc3b07b26d1fff2556
+子模块: e2e3f4e9d3b95a9e66b1ba83dc98d4a05ed8a3c4 include/ikd-Tree (e2e3f4e)
+项目提交: bf83c785ef7969644d8d5e1b43bf8864ea2e38f1
+本机源码工作区无未提交修改。

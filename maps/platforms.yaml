@@ -1,0 +1,28 @@
+frame_id: map
+resolution: 0.05
+source_database: output/demo/map.db
+platforms:
+  lower:
+    first_node: 1
+    last_node: 26
+    floor_z: -0.47
+    cells:
+      free: 3961
+      occupied: 2053
+      unknown: 21230
+  upper:
+    first_node: 41
+    last_node: 61
+    floor_z: 1.8
+    cells:
+      free: 2107
+      occupied: 1994
+      unknown: 30139
+ground_band_m:
+- -0.08
+- 0.08
+obstacle_top_above_floor_m: 1.2
+ray_tracing: false
+selection: First ascent, lower approach and first upper platform visit; excludes descent
+navigation_status: Draft maps. Stair connector regions, robot footprint and clearance
+  require validation.

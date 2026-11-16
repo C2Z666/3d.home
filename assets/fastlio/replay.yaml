@@ -1,0 +1,55 @@
+/**:
+  ros__parameters:
+    common:
+      imu_gyr_unit: rad
+      imu_topic: /front_lidar/imu
+      lid_topic: /front_lidar
+      time_offset_lidar_to_imu: 0.0
+      time_sync_en: false
+    cube_side_length: 1000.0
+    feature_extract_enable: false
+    filter_size_map: 0.15
+    filter_size_surf: 0.1
+    mapping:
+      acc_cov: 0.1
+      b_acc_cov: 0.0001
+      b_gyr_cov: 0.0001
+      det_range: 40.0
+      extrinsic_R:
+      - -0.006794552449357116
+      - -0.9999755844847188
+      - -0.0016323270071203055
+      - -0.9999638095030331
+      - 0.006802812132126801
+      - -0.005108955986826613
+      - 0.005119935663001315
+      - 0.001597554862980724
+      - -0.9999856169351972
+      extrinsic_T:
+      - 0.00425
+      - 0.00418
+      - -0.00446
+      extrinsic_est_en: false
+      fov_degree: 90.0
+      gyr_cov: 0.1
+    max_iteration: 3
+    pcd_save:
+      interval: -1
+      leaf_size: 0.0
+      pcd_save_en: false
+    point_filter_num: 3
+    preprocess:
+      blind: 0.3
+      lidar_type: 1
+      scan_line: 16
+      timestamp_unit: 0
+    publish:
+      dense_publish_en: true
+      effect_map_en: true
+      map_en: true
+      path_en: true
+      scan_bodyframe_pub_en: true
+      scan_publish_en: false
+    runtime_pos_log_enable: false
+    trajectory_save:
+      tum_en: false

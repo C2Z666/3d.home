@@ -1,0 +1,13 @@
+odom_topic: /Odometry
+odom_frame: d1_lio_init
+body_frame: d1_imu
+image_topic: /front_camera/image
+cloud_topic: /front_lidar
+cloud_frame: rslidar_head
+max_visual_age: 5.0
+matching_profile: relaxed
+base_height_m: 0.47
+obstacle_min_above_floor_m: 0.12
+obstacle_max_above_floor_m: 1.2
+range_min_m: 0.3
+range_max_m: 8.0

@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "map_id": "retained_762696f627ffad5e",
+  "sha256": {
+    "assets/output/demo/visual_map.npz": "762696f627ffad5e79a26b878c648563919ccbb3b9eec7928ce3ec3ad81f5306",
+    "config/calibration.yaml": "8aeff98d4fbea764583a87ac57a1943e0ded95ba2ff228595ed924d4b7884d10",
+    "maps/lower.yaml": "6549f6dfe3f63b2a10a6ce4f837a5811a88e22abd5b6a7408c96259876bc59be",
+    "maps/lower.pgm": "f45110f7e80ba7d0bae66db55bba5771c98c50e99c17e17bc2be6f9f79a83daa",
+    "maps/upper.yaml": "3ab6030dfc6328b2ef2df4a133f85ce987929c184dd4707adce88a1b217ba010",
+    "maps/upper.pgm": "2cd33276a0351a926cbd1f217e4a97cfef63de95d11d815c65a7e40faf2dbd12"
+  },
+  "entry_provenance": "Previously saved live entry retained without remeasurement; site validation remains false"
+}

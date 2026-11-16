@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<launch>
+  <arg name="robot_ip" default="192.168.168.168"/>
+  <arg name="robot_port" default="8082"/>
+  <arg name="max_lin_vel" default="0.8"/>
+  <arg name="max_ang_vel" default="1.2"/>
+  <arg name="max_lin_accel" default="1.0"/>
+  <arg name="max_ang_accel" default="2.0"/>
+  <arg name="watchdog_timeout" default="0.8"/>
+  <!-- Keyboard input needs a real TTY. Use run_teleop.sh in a second terminal,
+       or enable this option when gnome-terminal is available. -->
+  <arg name="start_keyboard" default="false"/>
+  <node pkg="d1_host_control" exec="d1_bridge" name="d1_bridge" output="screen">
+    <param name="robot_ip" value="$(var robot_ip)"/>
+    <param name="robot_port" value="$(var robot_port)"/>
+    <param name="max_lin_vel" value="$(var max_lin_vel)"/>
+    <param name="max_ang_vel" value="$(var max_ang_vel)"/>
+    <param name="max_lin_accel" value="$(var max_lin_accel)"/>
+    <param name="max_ang_accel" value="$(var max_ang_accel)"/>
+    <param name="watchdog_timeout" value="$(var watchdog_timeout)"/>
+  </node>
+  <node if="$(var start_keyboard)" pkg="d1_host_control" exec="teleop_keyboard"
+        name="teleop_keyboard" output="screen" launch-prefix="gnome-terminal --wait --"/>
+</launch>

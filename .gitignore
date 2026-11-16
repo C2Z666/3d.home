@@ -1,0 +1,24 @@
+# Build and runtime output
+/build/
+/install/
+/log/
+/work/
+/output/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.log
+*.pid
+*.tmp
+*.swp
+# Local backups
+*.bak
+*.before_live_env
+# Generated reports
+/docs/*_results.json
+/docs/*_smoke.json
+/docs/phase3_asset_check.json
+/docs/validation.json
+# Reference screenshots unrelated to localization
+/assets/*.png
+# Maps, visual banks, mapping databases and calibration stay tracked.

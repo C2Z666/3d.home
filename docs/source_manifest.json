@@ -1,0 +1,56 @@
+{
+  "inputs": [
+    [
+      "original_2d",
+      "C:/Users/张亚楠/Desktop/d1nav_safe（1）"
+    ],
+    [
+      "handoff_v3_1",
+      "d1nav_safe_flat_stair_handoff_v3_1.zip"
+    ],
+    [
+      "localization_mapping",
+      "rtabmap_lidar_mapping.launch(1).py"
+    ],
+    [
+      "mapping_p42",
+      "p42.zip"
+    ],
+    [
+      "merged_offline",
+      "export.zip"
+    ],
+    [
+      "merged_demo",
+      "3d_demo.zip"
+    ],
+    [
+      "platforms",
+      "platform_maps.zip"
+    ]
+  ],
+  "originals_modified": false,
+  "sdk_version": "0.2.1",
+  "ros_target": "Humble / Ubuntu 22.04",
+  "missing_runtime_assets": [
+    "output/demo/visual_map.npz",
+    "output/demo/map.db (needed for re-export only)",
+    "raw full bag (needed for rebuilding only)",
+    "FAST-LIO source/build/config runtime"
+  ],
+  "not_equivalent_assets": [
+    "smoke.db is environment test DB",
+    "corrected_trajectory.json is offline output, not visual feature bank"
+  ],
+  "sdk_changes": [
+    "No automatic SoftEmergencyStop(false)",
+    "No automatic StandUp() on control acquisition",
+    "Require fresh RobotState for all pose confirmations",
+    "Publish forward/lateral/yaw velocity and Stair speed cap"
+  ],
+  "controller_notes": [
+    "Stair policy commands forward x only; no stair vision, steering or automatic landing recognition",
+    "nav_handoff_hold is not used; it blocks stair motion too",
+    "Nav2 output passes exclusively through mission supervisor"
+  ]
+}
