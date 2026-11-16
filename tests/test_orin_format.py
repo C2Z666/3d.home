@@ -29,7 +29,8 @@ class OrinFormatTests(unittest.TestCase):
         call=next(n.value for n in ast.walk(tree) if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='ranges' for t in n.targets))
         code=compile(ast.Expression(call),'online_scan_call','eval')
         cfg=dict(range_min_m=.3,range_max_m=8.,base_height_m=.47,obstacle_min_above_floor_m=.12,obstacle_max_above_floor_m=1.2)
-        for point,expected in [([2.,0,0],540),([0,2.,0],360),([-2.,0,0],180),([0,-2.,0],0)]:
+        # Identity extrinsics preserve the raw axes. atan2(+Y, +X) sets scan bins.
+        for point,expected in [([2.,0,0],360),([0,2.,0],540),([-2.,0,0],0),([0,-2.,0],180)]:
             with self.subTest(point=point):
                 out=eval(code,dict(project=project,xyz=np.array([point]),N_B=np.eye(4),B_L=np.eye(4),c=cfg))
                 self.assertEqual(np.flatnonzero(np.isfinite(out)).tolist(),[expected])
@@ -46,6 +47,6 @@ class OrinFormatTests(unittest.TestCase):
         for ident in set(re.findall(r"\$\('([^']+)'\)",t)):
             self.assertIn(ident,parser.ids)
         self.assertIn('<title>D1 地图与融合定位</title>',t)
-        self.assertIn('楼梯预备点',t)
+        self.assertIn('已保存参考点',t)
 
 if __name__=='__main__':unittest.main()

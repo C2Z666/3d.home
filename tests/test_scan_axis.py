@@ -22,5 +22,6 @@ class ScanAxisTests(unittest.TestCase):
   expected=np.array([[0.,0.,1.],[0.,1.,0.],[-1.,0.,0.]])
   self.assertTrue(np.allclose(B_L[:3,:3],expected,atol=2e-3))
   self.assertGreater((B_L[:3,:3]@raw)[2],.99)
-  self.assertGreater((LIO_TO_NAV@np.array([0.,0.,1.]))[2],.99)
+  # FAST-LIO's measured world is Y-up; this is distinct from the body Z-up frame.
+  self.assertGreater((LIO_TO_NAV@np.array([0.,1.,0.]))[2],.99)
 if __name__=='__main__':unittest.main(verbosity=2)

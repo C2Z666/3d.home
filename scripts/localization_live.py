@@ -83,8 +83,8 @@ def main():
         if sdk_at>-math.inf:
             if time.monotonic()-sdk_at>.4: return 'SDK feedback stale'
             if sdk.get('state_fresh') is not True: return 'SDK state is not fresh'
-            if sdk.get('command_zero') is not True or sdk.get('motion_pending') is not False or sdk.get('motion')=='Stair':
-                return 'SDK must be stopped outside Stair'
+            if sdk.get('command_zero') is not True or sdk.get('motion_pending') is not False or sdk.get('motion') not in ('Walk','BalanceStand'):
+                return 'SDK must be stopped in Walk or BalanceStand'
             for k in ('reported_forward_speed','reported_lateral_speed','reported_yaw_rate'):
                 v=sdk.get(k)
                 if type(v) not in (int,float) or not math.isfinite(v) or abs(v)>.03: return 'SDK reports movement or invalid speed'
@@ -93,8 +93,8 @@ def main():
         nonlocal graph_error,graph_at,fault
         graph_at=time.monotonic(); graph_error=''
         names=set(node.get_node_names())
-        if names.intersection({'d1_nav_stair_supervisor','d1_stair_start'}): graph_error='end navigation/Stair task before relocalization'
-        for topic in ('/d1/sdk/supervised_cmd_vel','/d1/sdk/stair_cmd_vel','/d1/sdk/stair_motion_permit'):
+        if names.intersection({'d1_nav_supervisor'}): graph_error='end navigation task before relocalization'
+        for topic in ('/d1/sdk/supervised_cmd_vel',):
             if node.get_publishers_info_by_topic(topic): graph_error='active command publisher: '+topic
         if node.get_publishers_info_by_topic('/d1/sdk/d1_motion_status') and sdk_at==-math.inf:
             graph_error='waiting for SDK feedback'

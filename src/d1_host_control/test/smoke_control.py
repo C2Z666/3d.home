@@ -1,6 +1,7 @@
 """Exercise installed nodes, ROS topics, and SDK commands without robot/network access."""
 from pathlib import Path
 import os
+import json
 import pty
 import signal
 import subprocess
@@ -24,14 +25,14 @@ os.environ['ROS_LOCALHOST_ONLY'] = '1'
 rclpy.init()
 node = rclpy.create_node('d1_control_offline_check')
 cmd = node.create_publisher(Twist, 'cmd_vel', 10)
-stair_cmd = node.create_publisher(Twist, 'stair_cmd_vel', 10)
-stair_permit = node.create_publisher(Bool, 'stair_motion_permit', 10)
 action = node.create_publisher(String, 'd1_action', 10)
 posture = node.create_publisher(Int32, 'd1_posture', 10)
 speeds, poses = [], []
 node.create_subscription(Twist, 'cmd_vel', lambda msg: speeds.append(msg.linear.x), 10)
 node.create_subscription(Int32, 'd1_posture', lambda msg: poses.append(msg.data), 10)
 readiness = []
+statuses = []
+node.create_subscription(String, 'd1_motion_status', lambda msg: statuses.append(json.loads(msg.data)), 1)
 node.create_subscription(Bool, 'd1_motion_ready', lambda msg: readiness.append(msg.data), 1)
 
 def spin(seconds):
@@ -46,18 +47,6 @@ def drive(seconds, vx=0.6, wz=0.0, vy=0.0):
         msg.linear.x, msg.linear.y, msg.angular.z = vx, vy, wz
         cmd.publish(msg)
         spin(0.08)
-
-def stair_drive(seconds, vx=0.08):
-    end = time.monotonic() + seconds
-    while time.monotonic() < end:
-        stair_permit.publish(Bool(data=True))
-        nav_msg = Twist()
-        nav_msg.linear.x = 0.2
-        cmd.publish(nav_msg)
-        msg = Twist()
-        msg.linear.x = vx
-        stair_cmd.publish(msg)
-        spin(0.04)
 
 def wait_for(predicate, label, seconds=3.0):
     end = time.monotonic() + seconds
@@ -87,7 +76,6 @@ try:
         bridge_output = (output / 'bridge.log').open('w')
         bridge = subprocess.Popen([str(ws / 'install/d1_host_control/lib/d1_host_control/d1_bridge'),
                                    '--ros-args', '-p', 'robot_ip:=127.0.0.2',
-                                   '-p', 'stair_max_lin_vel:=0.08',
                                    '-p', 'trace_control:=true'],
                                   env=env, stdout=bridge_output, stderr=subprocess.STDOUT)
 
@@ -102,6 +90,11 @@ try:
             with commands.open('a') as file:
                 file.write(value + '\n')
 
+        wait_for(lambda: posture.get_subscription_count() > 0, 'Posture subscriber unavailable')
+        wait_for(lambda: statuses and statuses[-1]['control_held'] and
+                 not statuses[-1]['soft_stop'] and not statuses[-1]['hardware_stop'],
+                 'SDK control and recovered stop state unavailable')
+        posture.publish(Int32(data=1))
         wait_for(lambda: 'StandUp' in lines(), 'Startup did not request StandUp')
         wait_for(lambda: cmd.get_subscription_count() >= 2, 'Bridge ROS subscriptions unavailable')
         drive(0.4)
@@ -125,21 +118,6 @@ try:
         offset = len(lines())
         drive(0.35)
         assert not any(abs(fb) > 1e-6 for _, fb, _ in moves(offset)), 'Movement in balance stand'
-        posture.publish(Int32(data=3))
-        wait_for(lambda: 'Stair' in lines(), 'Posture 3 did not call Stair')
-        offset = len(lines())
-        drive(0.4, vx=0.2)
-        assert not any(abs(value) > 1e-6 for move in moves(offset) for value in move), \
-            'Ordinary /cmd_vel escaped into Stair mode'
-        stair_drive(0.6)
-        assert any(fb > 0.05 for _, fb, _ in moves(offset)), \
-            'Leased stair_cmd_vel did not move in the fake SDK'
-        stair_permit.publish(Bool(data=False))
-        spin(0.15)
-        assert all(abs(value) < 1e-6 for value in moves()[-1]), \
-            'Stair permit revocation did not stop the SDK'
-        print('PASS: Stair uses an isolated command channel and expiring mission permit', flush=True)
-
         action.publish(String(data='soft_stop_on'))
         spin(0.3)
         offset = len(lines())

@@ -6,7 +6,7 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 import cv2, numpy as np, yaml
 from scene_registry import load_scenes, scene_bundle, scene_list
-from site_identity import verify, verify_entry
+from site_identity import verify
 
 def yaw(q):
     return math.atan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z))
@@ -91,7 +91,6 @@ def main():
     default_scene=args.scene if args.scene in registry['scenes'] else registry['default']
     if default_scene=='old':
         verify(root)
-        verify_entry(root,yaml.safe_load((root/'config/site.yaml').read_text()))
     bundles={name:scene_bundle(root,name) for name in registry['scenes']}
     maps={name:map_assets(root,bundle) for name,bundle in bundles.items()}
     state=ViewerState(root,bundles[default_scene]['map_id']);camera={}

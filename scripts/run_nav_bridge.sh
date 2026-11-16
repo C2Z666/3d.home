@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -eo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-if [[ $# -ne 2 ]]; then echo "Usage: bash scripts/run_stair_bridge.sh ROBOT_IP STAIR_SPEED_CAP" >&2; exit 2; fi
+if [[ $# -ne 1 ]]; then echo "Usage: bash scripts/run_nav_bridge.sh ROBOT_IP" >&2; exit 2; fi
 if pgrep -x d1_bridge >/dev/null; then echo '已有 d1_bridge，请先结束原控制会话。' >&2; exit 1; fi
 source "$ROOT/scripts/env_live.sh"
 source "$ROOT/install/setup.bash"
 exec ros2 run d1_host_control d1_bridge --ros-args -r __ns:=/d1/sdk \
- -r cmd_vel:=supervised_cmd_vel -p "robot_ip:=$1" -p "stair_max_lin_vel:=$2" \
- -p flat_test_lock:=false -p max_lin_vel:=0.8 -p max_ang_vel:=0.25 \
+ -r cmd_vel:=supervised_cmd_vel -p "robot_ip:=$1" \
+ -p max_lin_vel:=0.15 -p max_ang_vel:=0.25 \
  -p max_lin_accel:=0.20 -p watchdog_timeout:=0.3 -p trace_control:=true

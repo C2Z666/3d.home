@@ -112,7 +112,7 @@ class TeleopKeyboard : public rclcpp::Node {
     // 动作指令请求(由 d1_bridge 消费并按状态机校验后调用对应 SDK API)
     action_pub_ =
         this->create_publisher<std_msgs::msg::String>("d1_action", 10);
-    // 姿态切换请求(SDK 姿态接口: 1=StandUp 2=BalanceStandUp 3=Stair)
+    // 姿态切换请求(SDK 姿态接口: 1=StandUp 2=BalanceStandUp)
     posture_pub_ =
         this->create_publisher<std_msgs::msg::Int32>("d1_posture", 10);
     // 50Hz 刷新；按键也立即发布。保留按一次保持、空格停止的操作方式。
@@ -131,7 +131,7 @@ class TeleopKeyboard : public rclcpp::Node {
     RCLCPP_INFO(this->get_logger(),
                 "SDK 档位(发 /d1_speed_level): 1=低 2=中 3=高");
     RCLCPP_INFO(this->get_logger(),
-                "姿态切换(发 /d1_posture): 7=StandUp 8=BalanceStandUp 9=Stair");
+                "姿态切换(发 /d1_posture): 7=StandUp 8=BalanceStandUp");
     RCLCPP_INFO(this->get_logger(),
                 "动作指令(发 /d1_action): r=站立 f=趴窝 c=匍匐行走 C=静止匍匐 v=爬高台 "
                 "b=步态 n=窄路 m=过挡鼠板 ;=沙地 h=禁用前后切换 l=锁定");
@@ -220,18 +220,17 @@ class TeleopKeyboard : public rclcpp::Node {
                         lvl.data == 1 ? "低速" : (lvl.data == 2 ? "中速" : "高速"));
             break;
           }
-          case '7':  // 姿态切换: 7=StandUp 8=BalanceStandUp 9=Stair
-          case '8':
-          case '9': {
+          case '7':  // 姿态切换: 7=StandUp 8=BalanceStandUp
+          case '8': {
             twist_ = geometry_msgs::msg::Twist();
             cmd_vel_pub_->publish(twist_);
             std_msgs::msg::Int32 mode;
-            mode.data = c - '6';  // '7'→1 '8'→2 '9'→3
+            mode.data = c - '6';  // '7'→1 '8'→2
             posture_pub_->publish(mode);
             RCLCPP_INFO(this->get_logger(),
                         "请求姿态切换: %d (%s)", mode.data,
                         mode.data == 1 ? "站立行走" :
-                        (mode.data == 2 ? "原地站立" : "登阶姿态"));
+                        "原地站立");
             break;
           }
           // ---- 动作指令：发字符串到 /d1_action，由 d1_bridge 校验状态后下发 ----

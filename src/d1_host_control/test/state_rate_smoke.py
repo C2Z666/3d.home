@@ -24,9 +24,8 @@ os.environ['ROS_LOCALHOST_ONLY'] = '1'
 rclpy.init()
 node = rclpy.create_node('d1_state_rate_offline_check')
 cmd = node.create_publisher(Twist, 'cmd_vel', 1)
-stair_cmd = node.create_publisher(Twist, 'stair_cmd_vel', 1)
-stair_permit = node.create_publisher(Bool, 'stair_motion_permit', 1)
 posture = node.create_publisher(Int32, 'd1_posture', 1)
+action = node.create_publisher(String, 'd1_action', 1)
 readiness = []
 statuses = []
 node.create_subscription(Bool, 'd1_motion_ready', lambda msg: readiness.append(msg.data), 1)
@@ -54,46 +53,6 @@ def drive(seconds):
         cmd.publish(message)
         spin(.04)
 
-def stair_drive(seconds):
-    end = time.monotonic()+seconds
-    while time.monotonic() < end:
-        stair_permit.publish(Bool(data=True))
-        nav_message = Twist()
-        nav_message.linear.x = .2
-        cmd.publish(nav_message)
-        message = Twist()
-        message.linear.x = .08
-        stair_cmd.publish(message)
-        spin(.04)
-
-def confirm_return_to_walk(posture, statuses, lines, event, wait_for):
-    """Fake SDK: command receipt -> intermediate StandUp -> injected Walk.
-
-    Keep the deliberate intermediate state. StandUp or an old Walk sample
-    must never be treated as fresh stable motion permission.
-    """
-    assert statuses, 'Missing SDK status before return-to-Walk request'
-    request_sequence = statuses[-1]['state_sequence']
-    stand_count = lines().count('StandUp')
-    posture.publish(Int32(data=1))
-    wait_for(lambda: lines().count('StandUp') > stand_count,
-             'Return-to-Walk request did not reach fake SDK StandUp')
-    wait_for(lambda: statuses and statuses[-1].get('motion') == 'StandUp' and
-             statuses[-1]['state_sequence'] > request_sequence and
-             statuses[-1]['state_fresh'] and statuses[-1]['motion_pending'] and
-             not statuses[-1]['ready'] and not statuses[-1]['bridge_motion_permitted'],
-             'Fake StandUp intermediate state did not keep motion blocked')
-    stand_sequence = statuses[-1]['state_sequence']
-    # StandUp() intentionally reports STAND_UP only. The harness must supply
-    # the later stable report, just as it does during initial startup.
-    event('walk')
-    wait_for(lambda: statuses and statuses[-1].get('motion') == 'Walk' and
-             statuses[-1]['state_sequence'] > stand_sequence and
-             statuses[-1]['state_fresh'] and statuses[-1]['control_held'] and
-             statuses[-1]['ready'] and not statuses[-1]['motion_pending'] and
-             statuses[-1]['bridge_motion_permitted'],
-             'Bridge did not return to a fresh confirmed Walk state')
-
 
 try:
     with tempfile.TemporaryDirectory(prefix='d1_state_rate_') as folder:
@@ -106,7 +65,7 @@ try:
             bridge = subprocess.Popen([str(ws/'install/d1_host_control/lib/d1_host_control/d1_bridge'),
                                        '--ros-args', '-p', 'robot_ip:=127.0.0.2',
                                        '-p', 'watchdog_timeout:=0.3', '-p',
-                                       'stair_max_lin_vel:=0.08', '-p', 'trace_control:=true'],
+                                       'trace_control:=true'],
                                       env=env, stdout=console, stderr=subprocess.STDOUT)
             def lines():
                 return log.read_text().splitlines() if log.exists() else []
@@ -116,6 +75,11 @@ try:
             def moves(start=0):
                 return [tuple(map(float, line.split()[1:])) for line in lines()[start:]
                         if line.startswith('Move ')]
+            wait_for(lambda: posture.get_subscription_count() > 0, 'Posture subscriber unavailable')
+            wait_for(lambda: statuses and statuses[-1]['control_held'] and
+                     not statuses[-1]['soft_stop'] and not statuses[-1]['hardware_stop'],
+                     'SDK control and recovered stop state unavailable')
+            posture.publish(Int32(data=1))
             wait_for(lambda: 'StandUp' in lines(), 'SDK bridge did not start')
             wait_for(lambda: cmd.get_subscription_count() >= 1, 'ROS velocity subscriptions unavailable')
             event('walk')
@@ -127,41 +91,12 @@ try:
             assert walk_status['control_held'] and walk_status['bridge_motion_permitted']
             assert not walk_status['soft_stop'] and not walk_status['hardware_stop']
             assert not walk_status['motion_pending']
-            posture.publish(Int32(data=3))
-            wait_for(lambda: any(status.get('motion') == 'Stair' and
-                                 status['state_sequence'] > walk_status['state_sequence']
-                                 for status in statuses),
-                     'Fresh SDK Stair state was not published')
-            stair_status = statuses[-1]
-            assert not stair_status['ready'], 'Walk-only readiness must remain false in Stair'
-            assert not stair_status['bridge_motion_permitted'], \
-                'Stair mode must remain blocked until the mission lease arrives'
-            assert not stair_status['stair_motion_permitted'], \
-                'Stair motion must remain locked until the mission lease arrives'
             offset = len(lines())
-            drive(.5)
-            assert not any(abs(value) > 1e-6 for move in moves(offset) for value in move), \
-                'Ordinary Nav2 /cmd_vel escaped into Stair mode'
-            stair_drive(.6)
-            assert any(fb > 0.01 for _, fb, _ in moves(offset)), \
-                'Fresh stair lease and stair_cmd_vel did not reach the fake SDK'
-            wait_for(lambda: statuses and statuses[-1]['stair_motion_permitted'],
-                     'Fresh stair lease was not reported')
-            spin(.45)
-            assert not statuses[-1]['stair_motion_permitted'] and \
-                not statuses[-1]['bridge_motion_permitted'], \
-                'Stair permit did not expire after heartbeat loss'
-            assert all(abs(value) < 1e-6 for value in moves()[-1]), \
-                'Stair permit heartbeat timeout did not stop SDK motion'
-            stair_drive(.4)
-            stair_permit.publish(Bool(data=False))
-            spin(.15)
-            assert all(abs(value) < 1e-6 for value in moves()[-1]), \
-                'Revoking the stair lease did not stop SDK motion'
-            assert not statuses[-1]['bridge_motion_permitted'] and \
-                not statuses[-1]['stair_motion_permitted']
-            confirm_return_to_walk(posture, statuses, lines, event, wait_for)
-            print('PASS: Stair exit remains blocked until a new confirmed Walk report', flush=True)
+            posture.publish(Int32(data=3))
+            action.publish(String(data='stair'))
+            spin(.4)
+            assert 'Stair' not in lines()[offset:], 'Removed stair entry still called the SDK'
+            assert statuses[-1]['motion'] == 'Walk'
             event('report_1hz')
             wait_for(lambda: 'ReportMode1Hz' in lines(), 'Fake SDK did not switch to 1Hz')
             spin(.15)

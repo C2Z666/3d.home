@@ -22,3 +22,6 @@ __pycache__/
 # Reference screenshots unrelated to localization
 /assets/*.png
 # Maps, visual banks, mapping databases and calibration stay tracked.
+
+# Generated format inspection report
+/docs/ORIN_格式检查报告.json
