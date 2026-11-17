@@ -44,11 +44,11 @@ pubs={k:n.create_publisher(t,topic,q) for k,t,topic,q in [
  ('sdk',String,'/d1/sdk/d1_motion_status',1),('loc',String,'/d1/localization/status',1),
  ('health',String,'/d1/nav/scan_status',1),('pose',PoseStamped,'/d1/localization/pose6d',10),
  ('odom',Odometry,'/d1/localization/odom',10),('scan',LaserScan,'/d1/nav/scan',qos_profile_sensor_data)]}
-x=y=yaw=0.;command=Twist();cmd_at=-math.inf;raw_count=0;forwarded=[];actions=[];ready=True
+x=y=yaw=0.;command=Twist();cmd_at=-math.inf;raw_count=0;forwarded=[];all_forwarded=[];actions=[];ready=True
 motion='Walk';seq=0;request=0;confirmed=0;sequence_at=0;last=time.monotonic();current_case='startup'
 def cmd(m):
  global command,cmd_at
- command=m;cmd_at=time.monotonic()
+ command=m;cmd_at=time.monotonic();all_forwarded.append((current_case,cmd_at,m.linear.x,m.angular.z))
  if abs(m.linear.x)>1e-5 or abs(m.angular.z)>1e-5:forwarded.append((current_case,time.monotonic(),m.linear.x,m.angular.z))
 def action(m):
  global motion,request,confirmed
@@ -97,19 +97,26 @@ try:
    elif client.service_is_ready():pending[name]=client.call_async(GetState.Request())
  if len(active)<4:raise AssertionError('Nav2 not active '+repr(active)+' '+(W/'nav2.log').read_text()[-8000:])
  reports['nav2_lifecycle_active']=sorted(active)
- for case in ('goal_reached','localization_loss'):
+ for case in ('goal_reached','localization_loss','runtime_limit'):
   current_case=case;x=y=yaw=0.;motion='Walk';ready=True;command=Twist();request=confirmed=0
   for _ in range(30):step()
-  args=['--live','--x','.55','--y','0','--yaw','0']
+  args=['--live','--x',('1.5' if case=='runtime_limit' else '.55'),'--y','0','--yaw','0']
   logfile=(W/(case+'.log')).open('w');process=subprocess.Popen([sys.executable,str(R/'scripts/navigate_to_goal.py')]+args,stdin=subprocess.PIPE,stdout=logfile,stderr=subprocess.STDOUT,text=True)
-  start=time.monotonic();loss_at=None
+  start=time.monotonic();loss_at=None;timeout_seen=None
   while time.monotonic()-start<40 and process.poll() is None:
    step()
+   if case=='runtime_limit' and timeout_seen is None and 'MAX_RUNTIME_EXCEEDED' in (W/(case+'.log')).read_text():timeout_seen=time.monotonic()
    if case=='localization_loss' and x>.05 and loss_at is None:ready=False;loss_at=time.monotonic()
   if process.poll() is None:process.send_signal(signal.SIGINT);process.wait(timeout=5);raise AssertionError(case+' timed out')
   for _ in range(20):step()
   logfile.close();log=(W/(case+'.log')).read_text();casecmd=[v for v in forwarded if v[0]==case]
-  if case=='localization_loss':
+  assert not [v for k,v in actions if k==case], 'Already Walk must not request StandUp'
+  if case=='runtime_limit':
+   assert process.returncode!=0 and timeout_seen is not None,log
+   assert '[START]' in log and '[COUNTDOWN]' in log and 'MAX_RUNTIME_EXCEEDED' in log,log
+   assert casecmd,'Timeout case never executed a velocity'
+   assert not [v for v in all_forwarded if v[0]==case and v[1]>timeout_seen+.15], 'Twist continued after runtime expiration'
+  elif case=='localization_loss':
    assert process.returncode!=0 and loss_at is not None,log
    assert not any(v[1]>loss_at+.5 for v in casecmd),casecmd
    assert all(value=='standup' for key,value in actions if key==case),actions

@@ -62,3 +62,9 @@ class Correction:
             if self.count<2: return False
         self.T=C; self.last_visual=t
         return True
+
+# Fixed basis measured on this FAST-LIO deployment: Y-up world -> Z-up navigation.
+LIO_TO_NAV=np.array([[0.,0.,-1.],[-1.,0.,0.],[0.,1.,0.]])
+def navigation_pose(O):
+    C=np.eye(4);C[:3,:3]=LIO_TO_NAV
+    return C@O

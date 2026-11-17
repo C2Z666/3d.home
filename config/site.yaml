@@ -1,13 +1,8 @@
 schema_version: 1
 initial_floor: lower
-maps_validated: false
-scan_source_validated: false
-entry:
-  x: 1.9245870099355233
-  y: -0.3280606512601746
-  z: 0.01784590223839
-  yaw: 0.09440958379120414
-  frame: map
+maps_validated: true
+scan_source_validated: true
+entry: null
 stair:
   speed: null
   duration: null
@@ -16,4 +11,5 @@ navigation:
   footprint_source: 'original config/planner.yaml: 0.98 x 0.53 m; verify with current
     Stair posture'
 upper_handoff: manual landing validation required; no automatic floor change
-entry_map_id: retained_762696f627ffad5e
+entry_map_id: d1_stairs_3d_20261117_160854
+operator_review_at: '2026-11-17T21:29:03.606062+08:00'

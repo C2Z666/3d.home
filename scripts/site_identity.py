@@ -2,7 +2,7 @@
 import hashlib, json
 from pathlib import Path
 FILES = ['assets/output/demo/visual_map.npz', 'config/calibration.yaml',
-         'maps/lower.yaml', 'maps/lower.pgm', 'maps/upper.yaml', 'maps/upper.pgm']
+         'maps/lower.yaml', 'maps/lower.pgm']
 def hashes(root):
     return {name: hashlib.sha256((root/name).read_bytes()).hexdigest() for name in FILES}
 def verify(root):

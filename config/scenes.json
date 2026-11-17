@@ -3,27 +3,18 @@
   "default": "old",
   "scenes": {
     "old": {
-      "label": "Old scene (retained)",
-      "map_id": "retained_762696f627ffad5e",
+      "label": "3D home scene (20261117_160854)",
+      "map_id": "d1_stairs_3d_20261117_160854",
       "visual_map": "assets/output/demo/visual_map.npz",
       "maps": {
         "lower": {
           "yaml": "maps/lower.yaml",
           "image": "maps/lower.pgm"
-        },
-        "upper": {
-          "yaml": "maps/upper.yaml",
-          "image": "maps/upper.pgm"
         }
       },
-      "entry": {
-        "x": 1.9245870099355233,
-        "y": -0.3280606512601746,
-        "z": 0.01784590223839,
-        "yaw": 0.09440958379120414,
-        "frame": "map"
-      },
-      "navigation_enabled": true
+      "entry": null,
+      "navigation_enabled": true,
+      "note": "New 3D database installed; platform_01 is the only validated map layer. Re-mark the live pose before navigation."
     },
     "front_A": {
       "label": "New scene (front_A_20261113_205139)",

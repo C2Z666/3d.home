@@ -1,8 +1,8 @@
 {
   "frame": "map",
-  "scans": 961,
-  "keyframes": 97,
-  "points": 75861,
+  "scans": 540,
+  "keyframes": 54,
+  "points": 53327,
   "method": "External gyro rotational deskew + RTAB-Map ICP odometry and geometric pose graph",
   "links": [
     {
@@ -16,39 +16,24 @@
       "type": 2
     },
     {
-      "from": 1,
+      "from": 2,
+      "to": 3,
+      "type": 0
+    },
+    {
+      "from": 2,
       "to": 12,
       "type": 2
     },
     {
-      "from": 1,
+      "from": 2,
       "to": 13,
       "type": 2
     },
     {
-      "from": 1,
+      "from": 2,
       "to": 14,
       "type": 2
-    },
-    {
-      "from": 1,
-      "to": 15,
-      "type": 2
-    },
-    {
-      "from": 1,
-      "to": 16,
-      "type": 2
-    },
-    {
-      "from": 1,
-      "to": 17,
-      "type": 2
-    },
-    {
-      "from": 2,
-      "to": 3,
-      "type": 0
     },
     {
       "from": 3,
@@ -56,9 +41,24 @@
       "type": 0
     },
     {
+      "from": 3,
+      "to": 38,
+      "type": 2
+    },
+    {
+      "from": 3,
+      "to": 39,
+      "type": 2
+    },
+    {
       "from": 4,
       "to": 5,
       "type": 0
+    },
+    {
+      "from": 4,
+      "to": 37,
+      "type": 2
     },
     {
       "from": 5,
@@ -66,9 +66,29 @@
       "type": 0
     },
     {
+      "from": 5,
+      "to": 15,
+      "type": 2
+    },
+    {
+      "from": 5,
+      "to": 40,
+      "type": 2
+    },
+    {
       "from": 6,
       "to": 7,
       "type": 0
+    },
+    {
+      "from": 6,
+      "to": 16,
+      "type": 2
+    },
+    {
+      "from": 6,
+      "to": 41,
+      "type": 2
     },
     {
       "from": 7,
@@ -76,14 +96,24 @@
       "type": 0
     },
     {
-      "from": 8,
-      "to": 9,
-      "type": 0
+      "from": 7,
+      "to": 17,
+      "type": 2
+    },
+    {
+      "from": 7,
+      "to": 42,
+      "type": 2
+    },
+    {
+      "from": 7,
+      "to": 43,
+      "type": 2
     },
     {
       "from": 8,
-      "to": 18,
-      "type": 2
+      "to": 9,
+      "type": 0
     },
     {
       "from": 9,
@@ -91,34 +121,9 @@
       "type": 0
     },
     {
-      "from": 9,
-      "to": 19,
-      "type": 2
-    },
-    {
-      "from": 9,
-      "to": 92,
-      "type": 2
-    },
-    {
       "from": 10,
       "to": 11,
       "type": 0
-    },
-    {
-      "from": 10,
-      "to": 20,
-      "type": 2
-    },
-    {
-      "from": 10,
-      "to": 21,
-      "type": 2
-    },
-    {
-      "from": 10,
-      "to": 22,
-      "type": 2
     },
     {
       "from": 11,
@@ -141,6 +146,11 @@
       "type": 0
     },
     {
+      "from": 14,
+      "to": 24,
+      "type": 2
+    },
+    {
       "from": 15,
       "to": 16,
       "type": 0
@@ -154,26 +164,6 @@
       "from": 17,
       "to": 18,
       "type": 0
-    },
-    {
-      "from": 17,
-      "to": 94,
-      "type": 2
-    },
-    {
-      "from": 17,
-      "to": 95,
-      "type": 2
-    },
-    {
-      "from": 17,
-      "to": 96,
-      "type": 2
-    },
-    {
-      "from": 17,
-      "to": 97,
-      "type": 2
     },
     {
       "from": 18,
@@ -206,19 +196,9 @@
       "type": 0
     },
     {
-      "from": 23,
-      "to": 33,
-      "type": 2
-    },
-    {
       "from": 24,
       "to": 25,
       "type": 0
-    },
-    {
-      "from": 24,
-      "to": 34,
-      "type": 2
     },
     {
       "from": 25,
@@ -227,7 +207,17 @@
     },
     {
       "from": 25,
-      "to": 35,
+      "to": 48,
+      "type": 2
+    },
+    {
+      "from": 25,
+      "to": 49,
+      "type": 2
+    },
+    {
+      "from": 25,
+      "to": 50,
       "type": 2
     },
     {
@@ -251,29 +241,14 @@
       "type": 0
     },
     {
-      "from": 29,
-      "to": 39,
-      "type": 2
-    },
-    {
       "from": 30,
       "to": 31,
       "type": 0
     },
     {
-      "from": 30,
-      "to": 40,
-      "type": 2
-    },
-    {
       "from": 31,
       "to": 32,
       "type": 0
-    },
-    {
-      "from": 31,
-      "to": 41,
-      "type": 2
     },
     {
       "from": 32,
@@ -301,19 +276,9 @@
       "type": 0
     },
     {
-      "from": 36,
-      "to": 46,
-      "type": 2
-    },
-    {
       "from": 37,
       "to": 38,
       "type": 0
-    },
-    {
-      "from": 37,
-      "to": 47,
-      "type": 2
     },
     {
       "from": 38,
@@ -321,19 +286,9 @@
       "type": 0
     },
     {
-      "from": 38,
-      "to": 48,
-      "type": 2
-    },
-    {
       "from": 39,
       "to": 40,
       "type": 0
-    },
-    {
-      "from": 39,
-      "to": 49,
-      "type": 2
     },
     {
       "from": 40,
@@ -351,9 +306,19 @@
       "type": 0
     },
     {
+      "from": 42,
+      "to": 52,
+      "type": 2
+    },
+    {
       "from": 43,
       "to": 44,
       "type": 0
+    },
+    {
+      "from": 43,
+      "to": 53,
+      "type": 2
     },
     {
       "from": 44,
@@ -409,248 +374,8 @@
       "from": 53,
       "to": 54,
       "type": 0
-    },
-    {
-      "from": 54,
-      "to": 55,
-      "type": 0
-    },
-    {
-      "from": 55,
-      "to": 56,
-      "type": 0
-    },
-    {
-      "from": 56,
-      "to": 57,
-      "type": 0
-    },
-    {
-      "from": 57,
-      "to": 58,
-      "type": 0
-    },
-    {
-      "from": 58,
-      "to": 59,
-      "type": 0
-    },
-    {
-      "from": 59,
-      "to": 60,
-      "type": 0
-    },
-    {
-      "from": 60,
-      "to": 61,
-      "type": 0
-    },
-    {
-      "from": 61,
-      "to": 62,
-      "type": 0
-    },
-    {
-      "from": 62,
-      "to": 63,
-      "type": 0
-    },
-    {
-      "from": 63,
-      "to": 64,
-      "type": 0
-    },
-    {
-      "from": 64,
-      "to": 65,
-      "type": 0
-    },
-    {
-      "from": 65,
-      "to": 66,
-      "type": 0
-    },
-    {
-      "from": 66,
-      "to": 67,
-      "type": 0
-    },
-    {
-      "from": 67,
-      "to": 68,
-      "type": 0
-    },
-    {
-      "from": 68,
-      "to": 69,
-      "type": 0
-    },
-    {
-      "from": 69,
-      "to": 70,
-      "type": 0
-    },
-    {
-      "from": 70,
-      "to": 71,
-      "type": 0
-    },
-    {
-      "from": 71,
-      "to": 72,
-      "type": 0
-    },
-    {
-      "from": 72,
-      "to": 73,
-      "type": 0
-    },
-    {
-      "from": 73,
-      "to": 74,
-      "type": 0
-    },
-    {
-      "from": 74,
-      "to": 75,
-      "type": 0
-    },
-    {
-      "from": 75,
-      "to": 76,
-      "type": 0
-    },
-    {
-      "from": 76,
-      "to": 77,
-      "type": 0
-    },
-    {
-      "from": 77,
-      "to": 78,
-      "type": 0
-    },
-    {
-      "from": 77,
-      "to": 87,
-      "type": 2
-    },
-    {
-      "from": 78,
-      "to": 79,
-      "type": 0
-    },
-    {
-      "from": 78,
-      "to": 88,
-      "type": 2
-    },
-    {
-      "from": 79,
-      "to": 80,
-      "type": 0
-    },
-    {
-      "from": 79,
-      "to": 89,
-      "type": 2
-    },
-    {
-      "from": 80,
-      "to": 81,
-      "type": 0
-    },
-    {
-      "from": 80,
-      "to": 90,
-      "type": 2
-    },
-    {
-      "from": 81,
-      "to": 82,
-      "type": 0
-    },
-    {
-      "from": 81,
-      "to": 91,
-      "type": 2
-    },
-    {
-      "from": 82,
-      "to": 83,
-      "type": 0
-    },
-    {
-      "from": 83,
-      "to": 84,
-      "type": 0
-    },
-    {
-      "from": 84,
-      "to": 85,
-      "type": 0
-    },
-    {
-      "from": 85,
-      "to": 86,
-      "type": 0
-    },
-    {
-      "from": 86,
-      "to": 87,
-      "type": 0
-    },
-    {
-      "from": 87,
-      "to": 88,
-      "type": 0
-    },
-    {
-      "from": 88,
-      "to": 89,
-      "type": 0
-    },
-    {
-      "from": 89,
-      "to": 90,
-      "type": 0
-    },
-    {
-      "from": 90,
-      "to": 91,
-      "type": 0
-    },
-    {
-      "from": 91,
-      "to": 92,
-      "type": 0
-    },
-    {
-      "from": 92,
-      "to": 93,
-      "type": 0
-    },
-    {
-      "from": 93,
-      "to": 94,
-      "type": 0
-    },
-    {
-      "from": 94,
-      "to": 95,
-      "type": 0
-    },
-    {
-      "from": 95,
-      "to": 96,
-      "type": 0
-    },
-    {
-      "from": 96,
-      "to": 97,
-      "type": 0
     }
   ],
-  "dataset": "/home/czc/ros2/dog/3d-demo/data/up_stair_demo/d1_stairs_3d_20261110_150243",
+  "dataset": "/mnt/hgfs/gxunbuntu22.04/d1_stairs_3d_20261117_160854",
   "calibration_sha256": "8aeff98d4fbea764583a87ac57a1943e0ded95ba2ff228595ed924d4b7884d10"
 }

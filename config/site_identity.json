@@ -1,13 +1,11 @@
 {
   "schema": 1,
-  "map_id": "retained_762696f627ffad5e",
+  "map_id": "d1_stairs_3d_20261117_160854",
   "sha256": {
-    "assets/output/demo/visual_map.npz": "762696f627ffad5e79a26b878c648563919ccbb3b9eec7928ce3ec3ad81f5306",
+    "assets/output/demo/visual_map.npz": "6e75f660811b7e1557338253ac5f35e2aba13121f9140ac2b48fd3c4dd7263f6",
     "config/calibration.yaml": "8aeff98d4fbea764583a87ac57a1943e0ded95ba2ff228595ed924d4b7884d10",
-    "maps/lower.yaml": "6549f6dfe3f63b2a10a6ce4f837a5811a88e22abd5b6a7408c96259876bc59be",
-    "maps/lower.pgm": "f45110f7e80ba7d0bae66db55bba5771c98c50e99c17e17bc2be6f9f79a83daa",
-    "maps/upper.yaml": "3ab6030dfc6328b2ef2df4a133f85ce987929c184dd4707adce88a1b217ba010",
-    "maps/upper.pgm": "2cd33276a0351a926cbd1f217e4a97cfef63de95d11d815c65a7e40faf2dbd12"
+    "maps/lower.yaml": "e7b11103f9de5ec7b8e9d0d70af0f9977333fa4d463d198b2c9de1a991d84640",
+    "maps/lower.pgm": "b3d5901d9478cfb9adeb735262d9ac5987fb16273d4c2907fd2f578a4d9f432a"
   },
-  "entry_provenance": "Previously saved live entry retained without remeasurement; site validation remains false"
+  "entry_provenance": "New 3D database installed; entry must be remeasured and site validation must be repeated."
 }

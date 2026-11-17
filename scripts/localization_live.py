@@ -4,7 +4,7 @@ import argparse,collections,hashlib,json,math,os,queue,threading,time,uuid
 from pathlib import Path
 import numpy as np,cv2
 from scipy.spatial.transform import Rotation
-from geometry import calibration,imu_from_base,pose_matrix,planar,interpolate
+from geometry import navigation_pose,calibration,imu_from_base,pose_matrix,planar,interpolate
 from fusion_policy import FusionPolicy
 from scene_registry import scene_bundle
 from site_identity import verify
@@ -133,11 +133,11 @@ def main():
             fault='odometry rotation discontinuity'; return
         previous=latest; latest=(t,O,m.header.stamp); received=time.monotonic(); history.append((t,O))
         if fusion.T is None: return
-        M=fusion.T@O; P=planar(O); Q=planar(M)
+        M=fusion.T@O; P=planar(navigation_pose(O)); Q=planar(M)
         od=Odometry(); od.header.frame_id='nav_odom'; od.header.stamp=m.header.stamp; od.child_frame_id='nav_base'
         setpose(od.pose.pose,P)
         if previous:
-            dt=t-previous[0]; d=np.linalg.inv(planar(previous[1]))@P
+            dt=t-previous[0]; d=np.linalg.inv(planar(navigation_pose(previous[1])))@P
             od.twist.twist.linear.x=float(d[0,3]/dt); od.twist.twist.linear.y=float(d[1,3]/dt)
             od.twist.twist.angular.z=float(math.atan2(d[1,0],d[0,0])/dt)
         # Covariance is not fabricated. Status carries validity; Nav2 uses odometry velocity.

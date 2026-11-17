@@ -3,10 +3,8 @@
 import argparse,collections,json,math,time
 from pathlib import Path
 import numpy as np,yaml
-from geometry import calibration,imu_from_base,pose_matrix,planar,interpolate,transform
+from geometry import calibration,imu_from_base,pose_matrix,planar,interpolate,transform,LIO_TO_NAV,navigation_pose
 
-# Measured FAST-LIO world (Y-up) -> nav convention (Z-up): nav_x=-lio_z, nav_y=-lio_x, nav_z=lio_y.
-LIO_TO_NAV=np.array([[0.0,0.0,-1.0],[-1.0,0.0,0.0],[0.0,1.0,0.0]])
 
 def cloud_xyz(m):
  fields={f.name:f for f in m.fields}
@@ -63,8 +61,7 @@ def main():
      O=interpolate(list(history),t)
      # FAST-LIO on this platform uses a Y-up world (static IMU acceleration is +Y).
      # Convert that world convention to the Z-up nav convention before leveling.
-     W_B=np.eye(4);W_B[:3,:3]=LIO_TO_NAV@O[:3,:3]
-     W_B[:3,3]=LIO_TO_NAV@O[:3,3]
+     W_B=navigation_pose(O)
      N_B=np.linalg.inv(planar(W_B))@W_B;N_B[:3,3]=0.0
      xyz=cloud_xyz(m);points=int(np.isfinite(xyz).all(axis=1).sum())
      if points<30:raise ValueError('too few finite raw points')
