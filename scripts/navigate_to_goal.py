@@ -100,6 +100,7 @@ def main():
  first_command_seen=False
  reacquire_count=0; planner_goal=None; planner_reply=None; planner_result=None
  route_reply=None; paused_state=None; stable_since=None; paused_sequence=None; paused_stamp=None; paused_at=None
+ next_turn_check_log=0.
  def zero():
   vel.publish(Twist())
  def fault(reason):
@@ -225,11 +226,14 @@ def main():
     and all(isinstance(sdk.get(k),(int,float)) and math.isfinite(sdk[k]) and abs(sdk[k])<.03
             for k in ('reported_forward_speed','reported_lateral_speed','reported_yaw_rate')))
  def reacquire(reason,now):
-  nonlocal state,deadline,halt_at,reacquire_count,raw,raw_at
-  # Only called AFTER FollowPath/NavigateToPose has returned success. No
+  nonlocal state,deadline,halt_at,reacquire_count,raw,raw_at,terminal
+  # Called after the path action ended, or during pre-path alignment before
+  # any action has started. No
   # concurrent old path is left running; obstacle/source/SDK failures remain
   # hard stops. The same mission deadline and final map goal are retained.
   zero()
+  if state=='ALIGN_PATH' and goal is None and (route_reply is None or route_reply.done()):
+   terminal=True  # No path controller is running; safe to replan after settling.
   if not terminal:
    fault('[REACQUIRE_INVALID_STATE] 路径执行尚未结束');return
   if reacquire_count>=3:
@@ -238,10 +242,28 @@ def main():
   raw=None;raw_at=-math.inf;stop_sequences.clear()
   print('[REACQUIRE_STOP] %s；第%d/3次，先停稳，再从当前位置重规划到原目标；总时限不重置。' % (reason,reacquire_count),flush=True)
  def turn_clear(now):
+  nonlocal next_turn_check_log
   if not costmap_fresh(now):
    return '局部代价地图超过0.5秒未更新，禁止终点转向'
   p=odom.pose.pose.position
-  return rotation_clearance(costmap,(p.x,p.y),turn_radius)
+  details={};reason=rotation_clearance(costmap,(p.x,p.y),turn_radius,details)
+  if reason or now>=next_turn_check_log:
+   print('[TURN_CHECK] '+json.dumps(dict(phase=state,**details),ensure_ascii=False),flush=True)
+   next_turn_check_log=now+1.
+  if reason:
+   # Preserve the map that ACTUALLY blocked motion. A later live map can have
+   # different dynamic points and cannot explain an earlier collision check.
+   label=args.path_file.name.replace('.path.json','') if args.path_file else str(os.getpid())
+   snapshot=root/'work/navigation'/(label+'.turn_clearance.json');snapshot.parent.mkdir(exist_ok=True)
+   info=costmap.info;q=info.origin.orientation
+   record=dict(reason=reason,phase=state,ros_now=n.get_clock().now().nanoseconds/1e9,
+               odom_pose=current_odom(),map_pose=current_pose(),target=target,check=details,
+               frame=costmap.header.frame_id,stamp=costmap.header.stamp.sec+costmap.header.stamp.nanosec*1e-9,
+               resolution=info.resolution,width=info.width,height=info.height,
+               origin=dict(x=info.origin.position.x,y=info.origin.position.y,q=[q.x,q.y,q.z,q.w]),data=list(costmap.data))
+   try:snapshot.write_text(json.dumps(record,ensure_ascii=False));print('[TURN_CHECK_SNAPSHOT] '+str(snapshot),flush=True)
+   except OSError as e:print('[TURN_CHECK_SNAPSHOT_FAILED] '+str(e),flush=True)
+  return reason
  def costmap_fresh(now):
   return costmap is not None and now-costmap_at<.5 and -.05<stamp_age(costmap.header)<.5
  def output(vx,wz,now):
@@ -399,6 +421,7 @@ def main():
    elif state in ('ALIGN_PATH','ALIGN_YAW'):
     if sdk.get('motion')!='Walk' or sdk.get('motion_pending') is not False: fault('Walk mode lost'); continue
     wz,reason=alignment.command(current_pose(),now,current_odom())
+    if reason.startswith('[ALIGN_ODOM_DRIFT]'):reacquire(reason,now);continue
     if reason.startswith('[ALIGN_GOAL_SHIFT]') and state=='ALIGN_YAW':reacquire(reason,now);continue
     if reason:fault(reason);continue
     if wz==0.:

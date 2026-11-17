@@ -32,6 +32,7 @@ from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
 from tf2_ros import TransformBroadcaster
 from lifecycle_msgs.srv import GetState
+from nav2_msgs.srv import ClearEntireCostmap
 rclpy.init();n=rclpy.create_node('phase3_nav2_simulator');tf=TransformBroadcaster(n)
 map_tf=TransformBroadcaster(n)
 map_transform=TransformStamped()
@@ -45,7 +46,7 @@ pubs={k:n.create_publisher(t,topic,q) for k,t,topic,q in [
  ('health',String,'/d1/nav/scan_status',1),('pose',PoseStamped,'/d1/localization/pose6d',10),
  ('odom',Odometry,'/d1/localization/odom',10),('scan',LaserScan,'/d1/nav/scan',qos_profile_sensor_data)]}
 x=y=yaw=0.;actual_vx=actual_wz=0.;trajectory=[];command=Twist();cmd_at=-math.inf;raw_count=0;forwarded=[];all_forwarded=[];actions=[];ready=True
-map_dx=0.;shift_enabled=False
+map_dx=0.;shift_enabled=False;drift_enabled=False
 tf_available=True;obstacle=False;motion='Walk';seq=0;request=0;confirmed=0;sequence_at=0;last=time.monotonic();current_case='startup'
 def cmd(m):
  global command,cmd_at
@@ -71,6 +72,7 @@ def step():
  vx=actual_vx;wz=0. if abs(actual_wz)<.08 else actual_wz
  if current_case=='slow_turn':wz*=.5
  if current_case=='turn_stall':wz=0.
+ if drift_enabled and abs(wz)>.1:vx=.035
  if current_case=='unexpected_reverse' and abs(wz)>.1:vx=-.10
  x+=vx*math.cos(yaw)*dt;y+=vx*math.sin(yaw)*dt;yaw+=wz*dt
  if shift_enabled:map_dx=max(-.18,map_dx-.03*dt)
@@ -84,7 +86,7 @@ def step():
  t=TransformStamped();t.header.stamp=stamp;t.header.frame_id='nav_odom';t.child_frame_id='nav_base';t.transform.translation.x=x;t.transform.translation.y=y;t.transform.rotation=pose.pose.orientation
  if tf_available:tf.sendTransform(t)
  # Publish scan acquisition time behind TF delivery, as with a buffered real sensor.
- scan=LaserScan();scan.header.stamp=(n.get_clock().now()-Duration(seconds=.1)).to_msg();scan.header.frame_id='nav_base';scan.angle_min=-math.pi;scan.angle_increment=2*math.pi/720;scan.angle_max=math.pi-scan.angle_increment;scan.range_min=.3;scan.range_max=8.;scan.ranges=[.5 if obstacle else math.inf]*720;pubs['scan'].publish(scan)
+ scan=LaserScan();scan.header.stamp=(n.get_clock().now()-Duration(seconds=.1)).to_msg();scan.header.frame_id='nav_base';scan.angle_min=-math.pi;scan.angle_increment=2*math.pi/720;scan.angle_max=math.pi-scan.angle_increment;scan.range_min=.3;scan.range_max=8.;scan.ranges=[(.75 if current_case=='turn_inflation' else .5) if obstacle else math.inf]*720;pubs['scan'].publish(scan)
  pubs['loc'].publish(String(data=json.dumps(dict(map_id='synthetic_navigation',session='synthetic_localizer',epoch=0,ready=ready,tracking_valid=True,tracking_fault='',mode='FUSED',source_stamp=stamp.sec+stamp.nanosec*1e-9))))
  pubs['health'].publish(String(data=json.dumps(dict(ready=True))))
  if now-sequence_at>.25:seq+=1;sequence_at=now
@@ -110,14 +112,25 @@ try:
    elif client.service_is_ready():pending[name]=client.call_async(GetState.Request())
  if len(active)<5:raise AssertionError('Nav2 not active '+repr(active)+' '+(W/'nav2.log').read_text()[-8000:])
  reports['nav2_lifecycle_active']=sorted(active)
- for case in ('goal_reached','localization_loss','runtime_limit','approved_path','approved_turn','behind_path','curved_path','slow_turn','turn_stall','unexpected_reverse','operator_cancel','tf_loss','turn_obstacle','visual_shift_turn','terminal_shift','tf_transient','tf_transient_turn'):
+ for case in ('goal_reached','localization_loss','runtime_limit','approved_path','approved_turn','behind_path','curved_path','slow_turn','turn_stall','unexpected_reverse','operator_cancel','tf_loss','turn_obstacle','visual_shift_turn','terminal_shift','tf_transient','tf_transient_turn','turn_inflation','turn_drift','turn_drift_path'):
   if os.environ.get('D1_TEST_CASES') and case not in os.environ['D1_TEST_CASES'].split(','):continue
-  current_case=case;tf_available=True;obstacle=False;x=y=yaw=0.;actual_vx=actual_wz=0.;motion='Walk';ready=True;command=Twist();request=confirmed=0;map_dx=0.;shift_enabled=False
+  current_case=case;tf_available=True;obstacle=False;x=y=yaw=0.;actual_vx=actual_wz=0.;motion='Walk';ready=True;command=Twist();request=confirmed=0;map_dx=0.;shift_enabled=False;drift_enabled=False
   for _ in range(30):step()
-  target_x=3. if case=='runtime_limit' else .02 if case in ('approved_turn','slow_turn','turn_stall','unexpected_reverse','turn_obstacle','tf_transient_turn') else -.5 if case in ('behind_path','visual_shift_turn') else .65 if case=='curved_path' else .55
+  # Independent synthetic cases must not inherit marked obstacles from the
+  # previous case (infinite laser ranges may not clear obstacle-layer cells).
+  # These services exist only in this isolated test ROS domain.
+  for name in ('local','global'):
+   c=n.create_client(ClearEntireCostmap,'/'+name+'_costmap/clear_entirely_'+name+'_costmap')
+   assert c.wait_for_service(timeout_sec=3)
+   f=c.call_async(ClearEntireCostmap.Request());until=time.monotonic()+3
+   while not f.done() and time.monotonic()<until:step()
+   assert f.done();n.destroy_client(c)
+  for _ in range(30):step()
+  drift_enabled=case in ('turn_drift','turn_drift_path')
+  target_x=3. if case=='runtime_limit' else .02 if case in ('approved_turn','slow_turn','turn_stall','unexpected_reverse','turn_obstacle','tf_transient_turn','turn_inflation','turn_drift') else -.5 if case in ('behind_path','visual_shift_turn','turn_drift_path') else .65 if case=='curved_path' else .55
   target_y=.1 if case=='behind_path' else .6 if case=='curved_path' else 0.
-  target_yaw=2.8 if case=='tf_transient_turn' else 2. if case=='terminal_shift' else math.pi if case in ('slow_turn','visual_shift_turn') else 1. if case in ('approved_turn','turn_stall','unexpected_reverse','behind_path','turn_obstacle') else math.pi/2 if case=='curved_path' else 0.
-  runtime=60. if case in ('visual_shift_turn','terminal_shift','tf_transient_turn') else 30. if case in ('behind_path','curved_path','slow_turn','tf_transient') else 10.
+  target_yaw=2.8 if case=='tf_transient_turn' else 2. if case=='terminal_shift' else math.pi if case in ('slow_turn','visual_shift_turn','turn_drift','turn_drift_path') else 1. if case in ('approved_turn','turn_stall','unexpected_reverse','behind_path','turn_obstacle','turn_inflation') else math.pi/2 if case=='curved_path' else 0.
+  runtime=60. if case in ('visual_shift_turn','terminal_shift','tf_transient_turn','turn_drift','turn_drift_path') else 30. if case in ('behind_path','curved_path','slow_turn','tf_transient') else 10.
   args=['--live','--x',str(target_x),'--y',str(target_y),'--yaw',str(target_yaw),'--max-runtime',str(runtime)]
   route=R/'work/approved_test.path.json';route.parent.mkdir(exist_ok=True)
   if case=='curved_path':
@@ -135,13 +148,14 @@ try:
    step()
    if case=='visual_shift_turn' and '[ALIGN_PATH]' in (W/(case+'.log')).read_text():shift_enabled=True
    if case=='terminal_shift' and '[ALIGN_YAW]' in (W/(case+'.log')).read_text():shift_enabled=True
+   if case in ('turn_drift','turn_drift_path') and '[REACQUIRE_STOP]' in (W/(case+'.log')).read_text():drift_enabled=False
    if case=='runtime_limit' and timeout_seen is None and 'MAX_RUNTIME_EXCEEDED' in (W/(case+'.log')).read_text():timeout_seen=time.monotonic()
    if case=='tf_loss' and x>.05:tf_available=False
    if case in ('tf_transient','tf_transient_turn'):
     trigger=abs(yaw)>.3 if case=='tf_transient_turn' else x>.05
     if trigger and loss_at is None:loss_at=time.monotonic()
     if loss_at is not None:tf_available=time.monotonic()-loss_at>(13. if case=='tf_transient_turn' else .8)
-   if case=='turn_obstacle' and '[ALIGN_YAW]' in (W/(case+'.log')).read_text():obstacle=True
+   if case in ('turn_obstacle','turn_inflation') and '[ALIGN_YAW]' in (W/(case+'.log')).read_text():obstacle=True
    if case=='operator_cancel' and x>.05 and cancel_at is None:cancel_at=time.monotonic();process.send_signal(signal.SIGINT)
    if case=='localization_loss' and x>.05 and loss_at is None:ready=False;loss_at=time.monotonic()
   if process.poll() is None:process.send_signal(signal.SIGINT);process.wait(timeout=5);raise AssertionError(case+' timed out')
@@ -175,6 +189,10 @@ try:
    if case in ('approved_path','approved_turn'):assert '[PATH]' in log and '[ACCEPTED]' in log and '[STOPPING]' in log,log
    if case=='visual_shift_turn':assert abs(map_dx)>.12 and '[ALIGN_METRICS]' in log,log
    if case=='terminal_shift':assert '[REACQUIRE_STOP]' in log and '[REPLAN_READY]' in log,log
+   if case in ('turn_drift','turn_drift_path'):assert '[ALIGN_ODOM_DRIFT]' in log and '[REACQUIRE_STOP]' in log and '[REPLAN_READY]' in log,log
+   if case=='turn_inflation':
+    checks=[json.loads(line.split('[TURN_CHECK] ',1)[1]) for line in log.splitlines() if '[TURN_CHECK] ' in line]
+    assert checks and max(v['ignored_inflated_cells'] for v in checks)>0,log
    if case=='tf_transient_turn':
     assert '[INPUT_PAUSE]' in log and '[INPUT_RECOVERED]' in log and 'ALIGN_NO_PROGRESS' not in log,log
     assert not any(loss_at+.55<v[1]<loss_at+13. for v in casecmd),'Motion while TF stale'

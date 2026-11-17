@@ -55,7 +55,7 @@ class HeadingAlignment:
         error = wrap(self.target[2]-pose[2])
         details = ' odom_drift=%.3fm map_alignment_shift=%.3fm goal_distance=%.3fm' % tuple(stats.values())
         if stats['odom_drift_m'] > .12:
-            return 0., '[ALIGN_ODOM_DRIFT] 转向期间FAST-LIO机身位移超过0.12m，停车检查；'+details
+            return 0., '[ALIGN_ODOM_DRIFT] 转向期间FAST-LIO机身位移超过0.12m，停车复核并重新规划；'+details
         if self.check_goal_position and stats['goal_distance_m'] > POSITION_RELEASE:
             return 0., '[ALIGN_GOAL_SHIFT] 地图中终点距离超过0.15m，需要重新接近目标；'+details
         if now-self.started >= ALIGN_TIMEOUT:
@@ -69,15 +69,20 @@ class HeadingAlignment:
         return max(-ALIGN_TURN_CAP, min(ALIGN_TURN_CAP, ALIGN_GAIN*error)), ''
 
 
-def rotation_clearance(grid, position, radius):
+def rotation_clearance(grid, position, radius, details=None):
     """Require a full padded-body turn disk to be known and collision free.
 
-    OccupancyGrid from Nav2: 99 is inscribed cost, 100 lethal, -1 unknown.
+    OccupancyGrid from Nav2: 99 is ALREADY inflated inscribed cost, 100
+    is an obstacle source, -1 unknown. Test the ROBOT CENTRE against 99;
+    test the full padded turn disk against 100/unknown. Applying 99 to
+    the full disk would add the robot's inscribed radius a second time.
     Intersect cells as squares (nearest point), not just cell centres. Unlike
     the reference's fail-open fallback, missing/stale maps never permit motion.
     Freshness/frame checks are the caller's responsibility.
     """
     info = grid.info
+    if details is None:details={}
+    details.update(radius_m=radius,ignored_inflated_cells=0,centre_cost=None,blocked_cell=None)
     res = info.resolution
     if (not math.isfinite(res) or res <= 0 or info.width <= 0 or info.height <= 0
             or len(grid.data) != info.width*info.height
@@ -86,6 +91,13 @@ def rotation_clearance(grid, position, radius):
     angle = quaternion_yaw(info.origin.orientation)
     dx, dy = position[0]-info.origin.position.x, position[1]-info.origin.position.y
     x, y = math.cos(angle)*dx+math.sin(angle)*dy, -math.sin(angle)*dx+math.cos(angle)*dy
+    centre_col,centre_row=math.floor(x/res),math.floor(y/res)
+    if not (0<=centre_col<info.width and 0<=centre_row<info.height):
+        return '机器人中心超出局部代价地图'
+    centre_cost=int(grid.data[centre_row*info.width+centre_col]);details['centre_cost']=centre_cost
+    if centre_cost<0 or centre_cost>=99:
+        details['blocked_cell']=[centre_col,centre_row,centre_cost]
+        return '机器人中心处于%s，格点(%d,%d)，代价%d' % ('未知区域' if centre_cost<0 else '不可通行区域',centre_col,centre_row,centre_cost)
     for row in range(math.floor((y-radius)/res), math.floor((y+radius)/res)+1):
         for col in range(math.floor((x-radius)/res), math.floor((x+radius)/res)+1):
             nearest_x = max(0., abs((col+.5)*res-x)-res/2)
@@ -95,8 +107,10 @@ def rotation_clearance(grid, position, radius):
             if not (0 <= col < info.width and 0 <= row < info.height):
                 return '转向包络超出局部代价地图'
             cost = int(grid.data[row*info.width+col])
-            if cost < 0 or cost >= 99:
-                return '转向包络内%s，格点(%d,%d)，代价%d' % ('存在未知区域' if cost < 0 else '存在障碍', col, row, cost)
+            if cost==99:details['ignored_inflated_cells']+=1
+            if cost < 0 or cost >= 100:
+                details['blocked_cell']=[col,row,cost]
+                return '半径%.3fm的完整转向包络内%s，格点(%d,%d)，代价%d；膨胀代价99不重复叠加机身尺寸' % (radius,'存在未知区域' if cost<0 else '存在真实障碍栅格',col,row,cost)
     return ''
 
 
