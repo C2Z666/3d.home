@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only map/FAST-LIO+visual/entry/scan viewer. No command publishers."""
+"""Map viewer with ComputePathToPose preview. No motion command publishers."""
 import argparse, collections, io, json, math, os, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -45,13 +45,29 @@ def map_assets(root,scene):
         maps[floor]=(dict(width=image.shape[1],height=image.shape[0],resolution=c['resolution'],origin=c['origin']),png.tobytes())
     return maps
 
-def handler(state,maps,camera,references,ros_now,scene_info,default_scene):
+def handler(state,maps,camera,references,ros_now,scene_info,default_scene,preview=None):
     html=(state.root/'web/index.html').read_bytes()
     class Handler(BaseHTTPRequestHandler):
         def log_message(self,*args):pass
         def send(self,code,body,kind):
             self.send_response(code);self.send_header('Content-Type',kind);self.send_header('Cache-Control','no-store')
             self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
+        def do_POST(self):
+            if urlparse(self.path).path!='/preview-plan':
+                return self.send(404,b'Not found','text/plain')
+            try:
+                if self.headers.get('Origin') not in (None, 'http://'+self.headers.get('Host',''), 'https://'+self.headers.get('Host','')):
+                    raise ValueError('只接受当前页面发起的规划请求')
+                length=int(self.headers.get('Content-Length','0'))
+                if not 0<length<=4096:raise ValueError('无效的请求长度')
+                data=json.loads(self.rfile.read(length))
+                if preview is None:raise ValueError('规划预览未启用')
+                result=preview.plan(data)
+                self.send(200,json.dumps(result,ensure_ascii=False,allow_nan=False).encode(),'application/json; charset=utf-8')
+            except (ValueError,KeyError,TypeError) as e:
+                self.send(400,json.dumps({'ok':False,'error':str(e),'code':getattr(e,'code','invalid_request'),'details':getattr(e,'details',None)},ensure_ascii=False).encode(),'application/json; charset=utf-8')
+            except Exception:
+                self.send(503,json.dumps({'ok':False,'error':'规划服务异常，请查看网页进程日志'},ensure_ascii=False).encode(),'application/json; charset=utf-8')
         def do_GET(self):
             try:
                 url=urlparse(self.path);q=parse_qs(url.query)
@@ -59,6 +75,13 @@ def handler(state,maps,camera,references,ros_now,scene_info,default_scene):
                 if scene_name not in maps: scene_name=default_scene
                 state.select(scene_name,scene_info[scene_name]['map_id'])
                 if url.path=='/':return self.send(200,html,'text/html; charset=utf-8')
+                if url.path=='/preview-costmap':
+                    try:
+                        if preview is None:raise ValueError('规划预览未启用')
+                        result=preview.costmap_view(scene_name,q.get('floor',['lower'])[0])
+                        return self.send(200,json.dumps(result,ensure_ascii=False,allow_nan=False).encode(),'application/json; charset=utf-8')
+                    except ValueError as e:
+                        return self.send(503,json.dumps({'ok':False,'error':str(e),'code':getattr(e,'code','costmap_unavailable')},ensure_ascii=False).encode(),'application/json; charset=utf-8')
                 if url.path=='/state':
                     data=state.snapshot(time.monotonic(),ros_now())
                     spec=scene_info[scene_name]
@@ -155,7 +178,9 @@ def main():
     n.create_subscription(NavPath,'/plan',path,1)
     n.create_subscription(Image,'/front_camera/image',image,qos_profile_sensor_data)
     scene_info={name:{k:v for k,v in bundle.items() if k not in ('root','visual_map','maps')} for name,bundle in bundles.items()}
-    server=ThreadingHTTPServer((args.host,args.port),handler(state,maps,camera,refs,clock,scene_info,default_scene));server.daemon_threads=True
+    from preview_planner import PreviewPlanner
+    preview=PreviewPlanner(n,state,maps,default_scene)
+    server=ThreadingHTTPServer((args.host,args.port),handler(state,maps,camera,refs,clock,scene_info,default_scene,preview));server.daemon_threads=True
     thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
     print(f'Read-only viewer: http://{args.host}:{args.port}',flush=True)
     try:rclpy.spin(n)
