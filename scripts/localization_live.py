@@ -60,7 +60,7 @@ def main():
     latest=None; received=-math.inf; fault=''; sequence=0; image_queue=queue.Queue(maxsize=1); results=queue.Queue()
     stop=threading.Event(); pending=[]; last_query=-math.inf
     visual_info={}; sdk={}; sdk_at=-math.inf; recovery_until=0.; recovery_after=-math.inf
-    graph_error=''; graph_at=-math.inf
+    graph_error=''; graph_at=-math.inf; last_state_key=None
     def seconds(h): return h.stamp.sec+h.stamp.nanosec*1e-9
     def ros_seconds(): return node.get_clock().now().nanoseconds*1e-9
     def on_sdk(m):
@@ -170,7 +170,7 @@ def main():
             except Exception as e:
                 results.put((seconds(m.header),None,time.monotonic(),dict(stamp=seconds(m.header),reason='visual worker: '+str(e),compute_sec=time.monotonic()-begin)))
     def tick():
-        nonlocal sequence,fault,pending,visual_info
+        nonlocal sequence,fault,pending,visual_info,last_state_key
         if time.monotonic()-graph_at>.5: audit_graph()
         fusion.expire(ros_seconds(),args.max_visual_age)
         if fusion.recovering:
@@ -181,7 +181,7 @@ def main():
             pending.append(item)
         remaining=[]
         for t,V,wall,info in pending:
-            info=dict(info,accepted=False,source_age=ros_seconds()-t,odom_bracket=False)
+            info=dict(info,accepted=False,match_ok=V is not None,match_reason=info.get('reason','no match'),source_age=ros_seconds()-t,odom_bracket=False)
             reason=info.get('reason','no match')
             if fault: reason=fault
             elif time.monotonic()-wall>1 or not -.1<=ros_seconds()-t<=1.5: reason='visual result expired'
@@ -200,11 +200,19 @@ def main():
         sequence+=1
         tracking=(not fault and latest is not None and time.monotonic()-received<.4 and 0<=ros_seconds()-latest[0]<.5)
         visual_age=ros_seconds()-fusion.last_visual if fusion.last_visual is not None else None
-        ready=bool(tracking and not fusion.required and visual_age is not None and 0<=visual_age<args.max_visual_age)
-        state='LOST' if not tracking else 'RELOCALIZING' if fusion.recovering else 'ODOM_ONLY' if fusion.required else 'WAITING' if fusion.T is None else 'FUSED'
+        visual_fresh=visual_age is not None and 0<=visual_age<args.max_visual_age
+        ready=bool(tracking and fusion.T is not None and not fusion.recovering)
+        state='LOST' if not tracking else 'RELOCALIZING' if fusion.recovering else 'WAITING' if fusion.T is None else 'FUSED' if visual_fresh else 'ODOM_ONLY'
+        reason=fault or ('FAST-LIO连续定位，等待有效视觉纠偏；导航可用' if state=='ODOM_ONLY' and ready else '视觉融合定位正常' if ready else fusion.reason)
         data=dict(session=session,sequence=sequence,epoch=fusion.epoch,map_id=map_id,tracking_valid=bool(tracking),ready=ready,
                   mode=state,recovery_required=fusion.required,relocalizing=fusion.recovering,visual=visual_info,
-                  image_info=image_info,image_recent=time.monotonic()-image_at<1.,visual_age=visual_age,source_stamp=latest[0] if latest else None,reason=fault or ('ready' if ready else fusion.reason))
+                  visual_fresh=visual_fresh,last_rejection_reason=fusion.last_rejection_reason,
+                  image_info=image_info,image_recent=time.monotonic()-image_at<1.,visual_age=visual_age,source_stamp=latest[0] if latest else None,reason=reason)
+        key=(state,ready,fault)
+        if key!=last_state_key:
+            event=dict(event='LOCALIZATION_STATE',state=state,ready=ready,reason=reason,epoch=fusion.epoch,stamp=ros_seconds())
+            audit.info(json.dumps(event,ensure_ascii=False));print('[LOCALIZATION] '+json.dumps(event,ensure_ascii=False),flush=True)
+            last_state_key=key
         statpub.publish(String(data=json.dumps(data,allow_nan=False)))
     node.create_subscription(Odometry,'/Odometry',onodom,qos_profile_sensor_data)
     node.create_subscription(Image,'/front_camera/image',onimage,qos_profile_sensor_data)

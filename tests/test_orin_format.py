@@ -24,7 +24,7 @@ class OrinFormatTests(unittest.TestCase):
             self.assertNotIn('/home/robot/zhangzhang/d1_stair_nav_phase3/scripts/env_live.sh',t)
         self.assertIn('PYTHONNOUSERSITE=1',(ROOT/'scripts/env_live.sh').read_text(encoding='utf-8'))
     def test_map_identity_and_scan_fix_are_retained(self):
-        self.assertTrue(verify(ROOT).startswith('retained_'))
+        self.assertEqual(verify(ROOT),json.loads((ROOT/'config/scenes.json').read_text())['scenes']['old']['map_id'])
         tree=ast.parse((ROOT/'scripts/cloud_scan.py').read_text(encoding='utf-8'))
         call=next(n.value for n in ast.walk(tree) if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='ranges' for t in n.targets))
         code=compile(ast.Expression(call),'online_scan_call','eval')

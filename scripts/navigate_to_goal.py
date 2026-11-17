@@ -3,6 +3,7 @@
 import argparse,json,math,signal,sys,time,os,fcntl
 from pathlib import Path
 import yaml
+from navigation_control import HeadingAlignment, MotionGuard, rotation_clearance, quaternion_yaw, wrap, initial_path_heading
 
 MAX_LINEAR_SPEED = 0.15
 MAX_ANGULAR_SPEED = 0.4
@@ -31,6 +32,10 @@ class WalkGate:
 
 def main():
  root=Path(__file__).resolve().parents[1]; cfg=yaml.safe_load((root/'config/site.yaml').read_text())
+ nav_cfg=yaml.safe_load((root/'config/nav2.yaml').read_text())
+ body=nav_cfg['local_costmap']['local_costmap']['ros__parameters']
+ padding=body['footprint_padding']
+ turn_radius=max(math.hypot(abs(x)+padding,abs(y)+padding) for x,y in json.loads(body['footprint']))
  p=argparse.ArgumentParser(description=__doc__); p.add_argument('--live',action='store_true',required=True)
  for key in ('x', 'y', 'yaw'):
   p.add_argument('--' + key, type=float, required=True)
@@ -63,14 +68,17 @@ def main():
  from rclpy.node import Node
  from rclpy.action import ActionClient
  from geometry_msgs.msg import PoseStamped,Twist
- from nav_msgs.msg import Odometry
+ from nav_msgs.msg import Odometry,OccupancyGrid
  from sensor_msgs.msg import LaserScan
  from nav2_msgs.action import NavigateToPose,FollowPath
  from nav_msgs.msg import Path as NavPath
  from std_msgs.msg import String
  from action_msgs.msg import GoalStatus
  from rclpy.signals import SignalHandlerOptions
+ from rclpy.time import Time
+ from tf2_ros import Buffer,TransformListener
  rclpy.init(signal_handler_options=SignalHandlerOptions.NO); n=Node('d1_nav_supervisor')
+ tf_buffer=Buffer();tf_listener=TransformListener(tf_buffer,n)
  interrupted=False
  def on_signal(*_):
   nonlocal interrupted
@@ -85,6 +93,10 @@ def main():
  execution_started=None; execution_deadline=None; next_countdown=None; runtime_expired=False
  state='WAIT'; deadline=time.monotonic()+60; goal=None; result=None; terminal=False; failed=''; stop_sequences=set(); halt_at=None
  scanhealth={}; health_at=-math.inf; next_wait_log=0.
+ costmap=None; costmap_at=-math.inf; alignment=None; motion_guard=MotionGuard(); next_control_log=0.
+ raw_controller=None; controller_at=-math.inf; command_missing_at=None
+ pending_message=None; align_halt_at=None
+ first_command_seen=False
  def zero():
   vel.publish(Twist())
  def fault(reason):
@@ -117,6 +129,13 @@ def main():
  def on_raw(m):
   nonlocal raw,raw_at
   raw=m; raw_at=time.monotonic()
+ def on_controller(m):
+  nonlocal raw_controller,controller_at
+  raw_controller=m;controller_at=time.monotonic()
+ def on_costmap(m):
+  nonlocal costmap,costmap_at
+  if m.header.frame_id=='nav_odom' and -.05<stamp_age(m.header)<.5:
+   costmap=m;costmap_at=time.monotonic()
  def on_odom(m):
   nonlocal odom,odom_at
   if m.header.frame_id=='nav_odom' and m.child_frame_id=='nav_base' and -.05<stamp_age(m.header)<.4: odom=m; odom_at=time.monotonic()
@@ -129,7 +148,9 @@ def main():
  n.create_subscription(String,'/d1/localization/status',on_loc,1)
  n.create_subscription(String,'/d1/nav/scan_status',on_health,1)
  n.create_subscription(PoseStamped,'/d1/localization/pose6d',on_pose,1)
- n.create_subscription(Twist,'/d1/nav/cmd_vel_raw',on_raw,1)
+ n.create_subscription(Twist,'/d1/nav/cmd_vel_smoothed',on_raw,1)
+ n.create_subscription(Twist,'/d1/nav/cmd_vel_raw',on_controller,1)
+ n.create_subscription(OccupancyGrid,'/local_costmap/costmap',on_costmap,1)
  n.create_subscription(Odometry,'/d1/localization/odom',on_odom,1)
  from rclpy.qos import qos_profile_sensor_data
  n.create_subscription(LaserScan,'/d1/nav/scan',on_scan,qos_profile_sensor_data)
@@ -143,6 +164,17 @@ def main():
    else:
     state='NAVIGATE'; print('[ACCEPTED] 执行模块已接收路线，开始受监督的速度输出。',flush=True)
   except Exception as e: fault('Nav2 goal request failed: '+str(e))
+ def submit_route():
+  nonlocal state,raw,raw_at,command_missing_at,first_command_seen
+  state='ACCEPT';raw=None;raw_at=-math.inf;command_missing_at=None;first_command_seen=False
+  # Initial alignment can take seconds. Never submit a path with that old TF time.
+  stamp=n.get_clock().now().to_msg()
+  if approved:
+   pending_message.path.header.stamp=stamp
+   for point in pending_message.path.poses:point.header.stamp=stamp
+  else:pending_message.pose.header.stamp=stamp
+  print('[TRACK_PATH] 起步方向已就绪，提交原预览路线给DWB，不重规划。',flush=True)
+  client.send_goal_async(pending_message).add_done_callback(accepted)
  def base_safe(now):
   return (now-sdk_at<.4 and all(sdk.get(k) is True for k in ('sdk_connected','control_held','state_fresh'))
    and all(sdk.get(k) is False for k in ('soft_stop','hardware_stop'))
@@ -158,7 +190,41 @@ def main():
   q=pose.pose.orientation; yaw=math.atan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z))
   angle=math.atan2(math.sin(yaw-target['yaw']),math.cos(yaw-target['yaw']))
   return math.hypot(pose.pose.position.x-target['x'],pose.pose.position.y-target['y'])<.13 and abs(angle)<.13
+ def tf_reason():
+  try:
+   t=tf_buffer.lookup_transform('map','nav_base',Time())
+   age=stamp_age(t.header)
+   if not -.05<age<.4:return 'map -> nav_base TF年龄 %.3fs，要求小于0.4s' % age
+   if pose is not None:
+    p=t.transform.translation;q=t.transform.rotation
+    if math.hypot(p.x-pose.pose.position.x,p.y-pose.pose.position.y)>.15 or abs(wrap(quaternion_yaw(q)-quaternion_yaw(pose.pose.orientation)))>.15:
+     return 'Nav2 TF与网页融合定位不一致'
+   return ''
+  except Exception as e:return str(e)
+ def current_pose():
+  return [pose.pose.position.x,pose.pose.position.y,quaternion_yaw(pose.pose.orientation)]
+ def turn_clear(now):
+  if not costmap_fresh(now):
+   return '局部代价地图超过0.5秒未更新，禁止终点转向'
+  p=odom.pose.pose.position
+  return rotation_clearance(costmap,(p.x,p.y),turn_radius)
+ def costmap_fresh(now):
+  return costmap is not None and now-costmap_at<.5 and -.05<stamp_age(costmap.header)<.5
+ def output(vx,wz,now):
+  nonlocal next_control_log
+  t=odom.twist.twist
+  measured=(t.linear.x,t.linear.y,t.angular.z)
+  reason=motion_guard.check(vx,wz,measured,now)
+  if reason:fault(reason);return
+  msg=Twist();msg.linear.x=vx;msg.angular.z=wz;vel.publish(msg)
+  if now>=next_control_log:
+   pos=current_pose();distance=math.hypot(pos[0]-target['x'],pos[1]-target['y'])
+   dwb=None if raw_controller is None else (round(raw_controller.linear.x,3),round(raw_controller.angular.z,3))
+   heading=alignment.target[2] if state in ('ALIGN_PATH','ALIGN_YAW') else target['yaw']
+   print('[CONTROL] phase=%s distance=%.3fm yaw_error=%.3frad DWB=%s sent=(%.3f,%.3f) measured=(%.3f,%.3f,%.3f)' % (state,distance,wrap(heading-pos[2]),dwb,vx,wz,*measured),flush=True)
+   next_control_log=now+1
  print('Navigating to map goal: '+str(target),flush=True)
+ print('[CONTROLLER] DWB StandardTrajectoryGenerator -> OPEN_LOOP smoother -> supervisor -> SDK bridge; position=0.10m, final_yaw=0.10rad, turn_cap=0.30rad/s; progress includes rotation.',flush=True)
  print('[LIMIT] max-runtime=%.1fs; starts at goal submission, includes acceptance/navigation/stopping; countdown every 5s.' % args.max_runtime,flush=True)
  try:
   while rclpy.ok() and state not in ('FAULT','DONE'):
@@ -183,19 +249,23 @@ def main():
    if loc_identity is not None and (loc.get('session'),loc.get('epoch'))!=loc_identity: fault('localization session/epoch changed; start a new task'); continue
    if state not in ('WAIT',) and (not base_safe(now) or not localization_safe(now)):
     fault('navigation SDK/localization/scan check failed; SDK=%s localization=%s scan=%s ages(sdk/loc/pose/scan/odom/health)=%s' % (sdk.get('reason'),loc.get('reason'),scanhealth.get('reason'),[round(now-v,3) for v in (sdk_at,loc_at,pose_at,scan_at,odom_at,health_at)]));continue
+   tf_block=tf_reason()
+   if state!='WAIT' and tf_block:fault('[TF_NOT_READY] '+tf_block);continue
    if state=='WAIT':
     zero()
     if now>=next_wait_log:
      blockers=[]
      if not base_safe(now):blockers.append('SDK连接/控制权/急停/状态新鲜度')
      if not localization_safe(now):blockers.append('定位/地图身份/扫描/里程计/倾斜或高度')
+     if tf_block:blockers.append('TF未就绪：'+tf_block)
+     if not costmap_fresh(now):blockers.append('等待新鲜局部代价地图')
      if sdk.get('command_zero') is not True:blockers.append('SDK命令尚非零速')
      measured=[sdk.get(k) for k in ('reported_forward_speed','reported_lateral_speed','reported_yaw_rate')]
      if not all(isinstance(v,(int,float)) and math.isfinite(v) and abs(v)<.03 for v in measured):blockers.append('SDK实测速率未停稳，要求各轴绝对值<0.03，当前='+str(measured))
      if sdk.get('motion')!='Walk' or sdk.get('motion_pending') is not False:blockers.append('等待Walk姿态确认')
      if not client.server_is_ready():blockers.append('执行动作服务未就绪')
      print('[WAIT] '+('；'.join(blockers) or '等待两个新鲜停稳/Walk状态确认')+'；准备阶段最多60s',flush=True);next_wait_log=now+5
-    if not base_safe(now) or not localization_safe(now) or sdk.get('command_zero') is not True: stop_sequences.clear(); walk_gate.reset_confirmation(); continue
+    if not base_safe(now) or not localization_safe(now) or tf_block or not costmap_fresh(now) or sdk.get('command_zero') is not True: stop_sequences.clear(); walk_gate.reset_confirmation(); continue
     stopped_values=[sdk.get(k,math.inf) for k in ('reported_forward_speed','reported_lateral_speed','reported_yaw_rate')]
     if not all(isinstance(v,(int,float)) and math.isfinite(v) and abs(v)<.03 for v in stopped_values): stop_sequences.clear(); walk_gate.reset_confirmation(); continue
     stop_sequences.add(sdk.get('state_sequence'))
@@ -218,16 +288,20 @@ def main():
       pnt=PoseStamped();pnt.header=message.path.header;pnt.pose.position.x=float(v['x']);pnt.pose.position.y=float(v['y']);pnt.pose.orientation.z=math.sin(v['yaw']/2);pnt.pose.orientation.w=math.cos(v['yaw']/2);message.path.poses.append(pnt)
      message.path.poses[-1].pose.orientation.z=math.sin(target['yaw']/2);message.path.poses[-1].pose.orientation.w=math.cos(target['yaw']/2)
      message.controller_id='FollowPath';message.goal_checker_id='goal_checker'
-     print('[PATH] 提交已确认的预览路线，共 %d 个点；终点朝向 %.4f rad' % (len(message.path.poses),target['yaw']),flush=True)
+     print('[PATH] 使用已确认的预览路线，共 %d 个点；终点朝向 %.4f rad' % (len(message.path.poses),target['yaw']),flush=True)
     else:
      message=NavigateToPose.Goal(); message.pose=PoseStamped(); message.pose.header.frame_id='map'; message.pose.header.stamp=n.get_clock().now().to_msg()
      message.pose.pose.position.x=target['x']; message.pose.pose.position.y=target['y']
      message.pose.pose.orientation.z=math.sin(target['yaw']/2); message.pose.pose.orientation.w=math.cos(target['yaw']/2)
      message.behavior_tree=str(root/'config/navigate.xml')
-    state='ACCEPT'
+    pending_message=message
     execution_started=now; execution_deadline=now+args.max_runtime; next_countdown=now+5; deadline=execution_deadline
     print('[START] Walk 已稳定确认%s；最大运行时间 %.1fs，剩余 %.1fs；到时自动终止并停止速度发布。' % ('，未重复发送 standup' if walk_gate.request_before is None else '',args.max_runtime,args.max_runtime),flush=True)
-    client.send_goal_async(message).add_done_callback(accepted)
+    pos=current_pose();heading=initial_path_heading(approved['poses'],pos) if approved else pos[2]
+    if abs(wrap(heading-pos[2]))>.35:
+     alignment=HeadingAlignment(pos,[pos[0],pos[1],heading],now);state='ALIGN_PATH';align_halt_at=None
+     print('[ALIGN_PATH] 先原地对准路线起步方向 %.3frad，速度上限0.30rad/s；计入本次最大运行时间。' % heading,flush=True)
+    else:submit_route()
    elif state in ('NAVIGATE','ACCEPT'):
     if sdk.get('motion')!='Walk' or sdk.get('motion_pending') is not False: fault('Walk mode lost'); continue
     if result and result.done():
@@ -235,15 +309,44 @@ def main():
      if result.result().status!=GoalStatus.STATUS_SUCCEEDED:
       response=result.result();detail=response.result
       fault('[CONTROLLER_FAILED] Nav2 status=%s error_code=%s message=%s；详见 work/navigation_nav2.log' % (response.status,getattr(detail,'error_code','unavailable'),getattr(detail,'error_msg','unavailable')));continue
-     print('[STOPPING] 控制器报告到达，开始零速与实际停稳复核。',flush=True)
-     state='STOPPING'; deadline=now+10; halt_at=now; stop_sequences.clear(); zero(); continue
+     pos=current_pose()
+     if math.hypot(pos[0]-target['x'],pos[1]-target['y'])>.13:
+      fault('[POSITION_NOT_REACHED] DWB报告到达，但融合定位终点距离未通过复核');continue
+     alignment=HeadingAlignment(pos,[target['x'],target['y'],target['yaw']],now)
+     state='ALIGN_YAW';zero()
+     print('[ALIGN_YAW] 路径跟踪已结束；位置已到达，开始独立终点朝向控制，转向上限0.30rad/s，12秒无朝向进展则停止。',flush=True)
+     continue
     if state=='NAVIGATE' and raw is not None and now-raw_at<.15:
      values=(raw.linear.x,raw.linear.y,raw.linear.z,raw.angular.x,raw.angular.y,raw.angular.z)
-     if not all(math.isfinite(v) for v in values) or not 0<=raw.linear.x<=MAX_LINEAR_SPEED or any(abs(v)>1e-6 for v in values[1:5]):
+     if not all(math.isfinite(v) for v in values) or not -1e-6<=raw.linear.x<=MAX_LINEAR_SPEED+1e-6 or any(abs(v)>1e-6 for v in values[1:5]):
       fault('unsupported Nav2 velocity: linear=(%.4f, %.4f, %.4f) angular=(%.4f, %.4f, %.4f)' % values); continue
-     raw.angular.z=max(-MAX_ANGULAR_SPEED,min(MAX_ANGULAR_SPEED,raw.angular.z))
-     vel.publish(raw)
-    else: zero()
+     command_missing_at=None;first_command_seen=True
+     output(max(0.,min(MAX_LINEAR_SPEED,raw.linear.x)),max(-MAX_ANGULAR_SPEED,min(MAX_ANGULAR_SPEED,raw.angular.z)),now)
+    else:
+     zero()
+     if state=='NAVIGATE':
+      if command_missing_at is None:
+       command_missing_at=now
+       if not first_command_seen:print('[WAIT_COMMAND] 等待首帧DWB平滑速度，最多3秒；保持零速，计入本次时限。',flush=True)
+      allowance=1. if first_command_seen else 3.
+      if now-command_missing_at>allowance:fault('[COMMAND_STREAM_LOST] DWB/速度平滑器持续%.1f秒没有新鲜输出；raw_age=%.2fs smoothed_age=%.2fs' % (allowance,now-controller_at,now-raw_at))
+   elif state in ('ALIGN_PATH','ALIGN_YAW'):
+    if sdk.get('motion')!='Walk' or sdk.get('motion_pending') is not False: fault('Walk mode lost'); continue
+    wz,reason=alignment.command(current_pose(),now)
+    if reason:fault(reason);continue
+    if wz==0.:
+     if state=='ALIGN_PATH':
+      zero()
+      if align_halt_at is None:align_halt_at=now
+      if now-align_halt_at>=.3 and abs(odom.twist.twist.angular.z)<.05:
+       alignment=None;submit_route()
+      continue
+     print('[STOPPING] 位置与最终朝向均通过，开始零速与实际停稳复核。',flush=True)
+     state='STOPPING';deadline=now+10;halt_at=now;stop_sequences.clear();zero();continue
+    reason=turn_clear(now)
+    if reason:fault('[TURN_CLEARANCE] '+reason);continue
+    align_halt_at=None
+    output(0.,wz,now)
    elif state=='STOPPING':
     zero()
     # Terminal result is required; cancel acknowledgement alone is not sufficient.

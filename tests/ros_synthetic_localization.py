@@ -24,6 +24,7 @@ world=transform(B_C,rays*4)
 visual=ROOT/'assets/output/demo/visual_map.npz'; np.savez_compressed(visual,stamps=np.array([1.]),image_indices=np.array([0]),pose_0=np.eye(4),uv_0=uv,desc_0=desc,world_0=world,image_0=cv2.imencode('.jpg',im)[1],odom_times=np.array([0.,1.]),odom_poses=np.array([np.eye(4),np.eye(4)]),calibration_sha256=hashlib.sha256(calib.read_bytes()).hexdigest())
 from site_identity import hashes
 (ROOT/'config/site_identity.json').write_text(json.dumps(dict(map_id='synthetic_test_only',sha256=hashes(ROOT))))
+registry=json.loads((ROOT/'config/scenes.json').read_text());registry['scenes']['old']['map_id']='synthetic_test_only';registry['scenes']['old']['visual_map']='assets/output/demo/visual_map.npz';(ROOT/'config/scenes.json').write_text(json.dumps(registry))
 os.environ.update(ROS_DOMAIN_ID='180',ROS_LOCALHOST_ONLY='1',RMW_IMPLEMENTATION='rmw_fastrtps_cpp')
 import rclpy
 from nav_msgs.msg import Odometry
@@ -71,11 +72,11 @@ try:
  pose=poses[-1].pose; err=float(np.linalg.norm([pose.position.x,pose.position.y,pose.position.z]))
  assert err<.05,('synthetic known-pose error',err)
  epoch=latest['epoch']
- wait(lambda:latest.get('ready') is False and latest.get('recovery_required') is True,6,images=False)
- assert latest['tracking_valid'] and latest['epoch']>epoch
- end=time.monotonic()+2
- while time.monotonic()<end:step(True)
- assert not latest['ready'],'recovery must not silently re-enable old mission'
+ wait(lambda:latest.get('mode')=='ODOM_ONLY',7,images=False)
+ assert latest['tracking_valid'] and latest['ready'] and not latest['recovery_required']
+ assert latest['epoch']==epoch
+ wait(lambda:latest.get('mode')=='FUSED' and latest['visual'].get('accepted'),20)
+ assert latest['ready'] and latest['epoch']==epoch,'visual return must recover without resetting identity'
  blocked=node.create_publisher(Twist,'/d1/sdk/supervised_cmd_vel',1)
  end=time.monotonic()+1
  while time.monotonic()<end:step(False)
@@ -95,7 +96,7 @@ try:
   cli_log.close()
  step(False,True)
  wait(lambda:latest.get('tracking_valid') is False,3,images=False)
- report=dict(synthetic_pnp_and_online_correction='PASS',known_pose_position_error_m=err,visual_timeout_revokes_ready='PASS',recovery_requires_explicit_request='PASS',active_command_publisher_blocks_recovery='PASS',stationary_three_frame_recovery='PASS',relocalize_cli_epoch_confirmation='PASS',odometry_reset_revokes_ready='PASS',field_accuracy_verified=False)
+ report=dict(synthetic_pnp_and_online_correction='PASS',known_pose_position_error_m=err,visual_dropout_keeps_fastlio_navigation_ready='PASS',visual_return_fuses_without_manual_request='PASS',active_command_publisher_blocks_recovery='PASS',stationary_three_frame_recovery='PASS',relocalize_cli_epoch_confirmation='PASS',odometry_reset_revokes_ready='PASS',field_accuracy_verified=False)
  (WORK/'report.json').write_text(json.dumps(report,indent=2)); print(json.dumps(report),flush=True)
 finally:
  process.terminate(); process.wait(timeout=8); console.close(); node.destroy_node(); rclpy.shutdown()

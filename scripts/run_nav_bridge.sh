@@ -8,4 +8,4 @@ source "$ROOT/install/setup.bash"
 exec ros2 run d1_host_control d1_bridge --ros-args -r __ns:=/d1/sdk \
  -r cmd_vel:=supervised_cmd_vel -p "robot_ip:=$1" \
  -p max_lin_vel:=0.15 -p max_ang_vel:=0.4 \
- -p max_lin_accel:=0.20 -p watchdog_timeout:=0.3 -p trace_control:=true
+ -p max_lin_accel:=0.5 -p max_ang_accel:=1.0 -p watchdog_timeout:=0.3 -p trace_control:=true

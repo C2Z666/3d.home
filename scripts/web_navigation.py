@@ -59,6 +59,10 @@ class NavigationManager:
                     self.lines.append(formatted)
                     if line.startswith('[START]'):
                         self.started_mono=time.monotonic();self.task.update(state='RUNNING',started_at=time.time(),reason=line)
+                    elif line.startswith('[ALIGN_YAW]'):self.task.update(state='ALIGNING',reason=line)
+                    elif line.startswith('[ALIGN_PATH]'):self.task.update(state='ALIGNING_PATH',reason=line)
+                    elif line.startswith('[TRACK_PATH]'):self.task.update(state='RUNNING',reason=line)
+                    elif line.startswith('[CONTROL]'):self.task.update(reason=line)
                     elif line.startswith('[STOPPING]'):self.task.update(state='STOPPING',reason=line)
                     elif line.startswith('FAULT:'):self.task.update(reason=line)
                     elif line.startswith('[WAIT]'):self.task.update(reason=line)
