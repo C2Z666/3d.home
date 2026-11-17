@@ -97,10 +97,16 @@ try:
    elif client.service_is_ready():pending[name]=client.call_async(GetState.Request())
  if len(active)<4:raise AssertionError('Nav2 not active '+repr(active)+' '+(W/'nav2.log').read_text()[-8000:])
  reports['nav2_lifecycle_active']=sorted(active)
- for case in ('goal_reached','localization_loss','runtime_limit'):
+ for case in ('goal_reached','localization_loss','runtime_limit','approved_path','approved_turn'):
   current_case=case;x=y=yaw=0.;motion='Walk';ready=True;command=Twist();request=confirmed=0
   for _ in range(30):step()
-  args=['--live','--x',('1.5' if case=='runtime_limit' else '.55'),'--y','0','--yaw','0']
+  target_x=1.5 if case=='runtime_limit' else .02 if case=='approved_turn' else .55
+  target_yaw=.4 if case=='approved_turn' else 0.
+  args=['--live','--x',str(target_x),'--y','0','--yaw',str(target_yaw)]
+  if case in ('approved_path','approved_turn'):
+   route=R/'work/approved_test.path.json';route.parent.mkdir(exist_ok=True)
+   route.write_text(json.dumps(dict(plan=dict(map_id='synthetic_navigation',localization_session='synthetic_localizer',localization_epoch=0,start=dict(x=0.,y=0.,yaw=0.)),poses=[dict(x=float(v),y=0.,yaw=0.) for v in np.linspace(0.,target_x,12)])))
+   args+=['--path-file',str(route)]
   logfile=(W/(case+'.log')).open('w');process=subprocess.Popen([sys.executable,str(R/'scripts/navigate_to_goal.py')]+args,stdin=subprocess.PIPE,stdout=logfile,stderr=subprocess.STDOUT,text=True)
   start=time.monotonic();loss_at=None;timeout_seen=None
   while time.monotonic()-start<40 and process.poll() is None:
@@ -122,9 +128,10 @@ try:
    assert all(value=='standup' for key,value in actions if key==case),actions
   else:
    assert process.returncode==0,(log,x,y,raw_count,len(casecmd),actions)
-   assert abs(x-.55)<.13 and abs(y)<.13,(x,y,log)
+   assert abs(x-target_x)<.13 and abs(y)<.13 and abs(yaw-target_yaw)<.13,(x,y,yaw,log)
    assert bool(casecmd),'Nav2 never forwarded a moving command'
    assert 'DONE: goal reached and stopped' in log,log
+   if case in ('approved_path','approved_turn'):assert '[PATH]' in log and '[ACCEPTED]' in log and '[STOPPING]' in log,log
   reports[case]=dict(result='PASS',exit_code=process.returncode,final_pose=[x,y,yaw],forwarded_commands=len(casecmd))
   process=None
  reports.update(raw_nav2_commands=raw_count,hardware_connected=False,synthetic_floor_only=True)

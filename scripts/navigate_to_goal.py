@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Navigate to an explicit map-frame goal and finish after stopping."""
-import argparse,json,math,signal,sys,time
+import argparse,json,math,signal,sys,time,os,fcntl
 from pathlib import Path
 import yaml
 
@@ -37,10 +37,22 @@ def main():
  p.add_argument('--z', type=float, default=0., help='Expected base height in map coordinates, metres')
  p.add_argument('--scene', default='old')
  p.add_argument('--max-runtime',type=float,default=10.,help='Maximum seconds from goal submission through stopped confirmation (default: 10)')
+ p.add_argument('--path-file',type=Path,help='Server-owned approved path; execute FollowPath without replanning')
+ p.add_argument('--owner-pid',type=int,help='Stop if the owning web process exits')
  args=p.parse_args()
  if not math.isfinite(args.max_runtime) or args.max_runtime<=0: p.error('--max-runtime must be finite and positive')
  target={key:getattr(args,key) for key in ('x','y','z','yaw')}
  if not all(math.isfinite(v) for v in target.values()): p.error('target coordinates must be finite')
+ (root/'work').mkdir(exist_ok=True)
+ lease=(root/'work/navigation_mission.lock').open('a')
+ try:fcntl.flock(lease,fcntl.LOCK_EX|fcntl.LOCK_NB)
+ except BlockingIOError:p.error('another navigation supervisor already owns this repository')
+ approved=None
+ if args.path_file:
+  approved=json.loads(args.path_file.read_text())
+  values=approved.get('poses',[])
+  if not values or not all(all(isinstance(v.get(k),(float,int)) and math.isfinite(v[k]) for k in ('x','y','yaw')) for v in values):p.error('invalid approved path')
+  if math.hypot(values[-1]['x']-target['x'],values[-1]['y']-target['y'])>.001:p.error('path endpoint does not match goal')
  from scene_registry import scene_bundle
  from site_identity import verify
  scene=scene_bundle(root,args.scene)
@@ -53,7 +65,8 @@ def main():
  from geometry_msgs.msg import PoseStamped,Twist
  from nav_msgs.msg import Odometry
  from sensor_msgs.msg import LaserScan
- from nav2_msgs.action import NavigateToPose
+ from nav2_msgs.action import NavigateToPose,FollowPath
+ from nav_msgs.msg import Path as NavPath
  from std_msgs.msg import String
  from action_msgs.msg import GoalStatus
  from rclpy.signals import SignalHandlerOptions
@@ -65,13 +78,13 @@ def main():
  signal.signal(signal.SIGINT,on_signal); signal.signal(signal.SIGTERM,on_signal)
  vel=n.create_publisher(Twist,'/d1/sdk/supervised_cmd_vel',1)
  action=n.create_publisher(String,'/d1/sdk/d1_action',1)
- client=ActionClient(n,NavigateToPose,'/navigate_to_pose')
+ client=ActionClient(n,FollowPath if approved else NavigateToPose,'/follow_path' if approved else '/navigate_to_pose')
  sdk={}; loc={}; pose=None; raw=None; odom=None
  sdk_at=loc_at=pose_at=raw_at=odom_at=scan_at=-math.inf
  sdk_identity=None; loc_identity=None; walk_gate=WalkGate()
  execution_started=None; execution_deadline=None; next_countdown=None; runtime_expired=False
  state='WAIT'; deadline=time.monotonic()+60; goal=None; result=None; terminal=False; failed=''; stop_sequences=set(); halt_at=None
- scanhealth={}; health_at=-math.inf
+ scanhealth={}; health_at=-math.inf; next_wait_log=0.
  def zero():
   vel.publish(Twist())
  def fault(reason):
@@ -127,7 +140,8 @@ def main():
    if not goal.accepted: fault('Nav2 rejected goal'); return
    result=goal.get_result_async()
    if state=='FAULT': goal.cancel_goal_async()
-   else: state='NAVIGATE'
+   else:
+    state='NAVIGATE'; print('[ACCEPTED] 执行模块已接收路线，开始受监督的速度输出。',flush=True)
   except Exception as e: fault('Nav2 goal request failed: '+str(e))
  def base_safe(now):
   return (now-sdk_at<.4 and all(sdk.get(k) is True for k in ('sdk_connected','control_held','state_fresh'))
@@ -149,7 +163,11 @@ def main():
  try:
   while rclpy.ok() and state not in ('FAULT','DONE'):
    rclpy.spin_once(n,timeout_sec=.03); now=time.monotonic()
-   if interrupted: fault('operator interrupted'); continue
+   if interrupted: fault('[CANCELED] 操作者取消或服务关闭'); continue
+   if args.owner_pid:
+    try:os.kill(args.owner_pid,0)
+    except ProcessLookupError:fault('[OWNER_LOST] 网页服务进程已退出');continue
+   if n.count_publishers('/d1/sdk/supervised_cmd_vel')>1:fault('[MULTIPLE_CONTROLLERS] 检测到多个速度发布者');continue
    if execution_deadline is not None and now>=execution_deadline:
     runtime_expired=True
     fault('[MAX_RUNTIME_EXCEEDED] 最大运行时间 %.1fs 已到，已运行 %.2fs；取消任务并发送最后一次零速，随后停止所有速度发布，不自动恢复。' % (args.max_runtime,now-execution_started))
@@ -163,9 +181,20 @@ def main():
     continue
    if sdk_identity is not None and (sdk.get('bridge_session'),sdk.get('safety_epoch'))!=sdk_identity: fault('SDK session/safety changed'); continue
    if loc_identity is not None and (loc.get('session'),loc.get('epoch'))!=loc_identity: fault('localization session/epoch changed; start a new task'); continue
-   if state not in ('WAIT',) and (not base_safe(now) or not localization_safe(now)): fault('navigation SDK/localization/scan check failed'); continue
+   if state not in ('WAIT',) and (not base_safe(now) or not localization_safe(now)):
+    fault('navigation SDK/localization/scan check failed; SDK=%s localization=%s scan=%s ages(sdk/loc/pose/scan/odom/health)=%s' % (sdk.get('reason'),loc.get('reason'),scanhealth.get('reason'),[round(now-v,3) for v in (sdk_at,loc_at,pose_at,scan_at,odom_at,health_at)]));continue
    if state=='WAIT':
     zero()
+    if now>=next_wait_log:
+     blockers=[]
+     if not base_safe(now):blockers.append('SDK连接/控制权/急停/状态新鲜度')
+     if not localization_safe(now):blockers.append('定位/地图身份/扫描/里程计/倾斜或高度')
+     if sdk.get('command_zero') is not True:blockers.append('SDK命令尚非零速')
+     measured=[sdk.get(k) for k in ('reported_forward_speed','reported_lateral_speed','reported_yaw_rate')]
+     if not all(isinstance(v,(int,float)) and math.isfinite(v) and abs(v)<.03 for v in measured):blockers.append('SDK实测速率未停稳，要求各轴绝对值<0.03，当前='+str(measured))
+     if sdk.get('motion')!='Walk' or sdk.get('motion_pending') is not False:blockers.append('等待Walk姿态确认')
+     if not client.server_is_ready():blockers.append('执行动作服务未就绪')
+     print('[WAIT] '+('；'.join(blockers) or '等待两个新鲜停稳/Walk状态确认')+'；准备阶段最多60s',flush=True);next_wait_log=now+5
     if not base_safe(now) or not localization_safe(now) or sdk.get('command_zero') is not True: stop_sequences.clear(); walk_gate.reset_confirmation(); continue
     stopped_values=[sdk.get(k,math.inf) for k in ('reported_forward_speed','reported_lateral_speed','reported_yaw_rate')]
     if not all(isinstance(v,(int,float)) and math.isfinite(v) and abs(v)<.03 for v in stopped_values): stop_sequences.clear(); walk_gate.reset_confirmation(); continue
@@ -178,10 +207,24 @@ def main():
      action.publish(String(data='standup')); continue
     if mode!='ready':continue
     if not client.server_is_ready(): continue
-    message=NavigateToPose.Goal(); message.pose=PoseStamped(); message.pose.header.frame_id='map'; message.pose.header.stamp=n.get_clock().now().to_msg()
-    message.pose.pose.position.x=target['x']; message.pose.pose.position.y=target['y']
-    message.pose.pose.orientation.z=math.sin(target['yaw']/2); message.pose.pose.orientation.w=math.cos(target['yaw']/2)
-    message.behavior_tree=str(root/'config/navigate.xml'); state='ACCEPT'
+    if approved:
+     bound=approved['plan']
+     if (loc.get('map_id'),loc.get('session'),loc.get('epoch'))!=(bound['map_id'],bound['localization_session'],bound['localization_epoch']):fault('[STALE_PLAN] 规划后定位身份改变');continue
+     q=pose.pose.orientation;current_yaw=math.atan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z))
+     yaw_change=math.atan2(math.sin(current_yaw-bound['start']['yaw']),math.cos(current_yaw-bound['start']['yaw']))
+     if math.hypot(pose.pose.position.x-bound['start']['x'],pose.pose.position.y-bound['start']['y'])>.15 or abs(yaw_change)>.25:fault('[STALE_PLAN] 准备期间起点或朝向变化，请重新规划');continue
+     message=FollowPath.Goal();message.path=NavPath();message.path.header.frame_id='map';message.path.header.stamp=n.get_clock().now().to_msg()
+     for v in approved['poses']:
+      pnt=PoseStamped();pnt.header=message.path.header;pnt.pose.position.x=float(v['x']);pnt.pose.position.y=float(v['y']);pnt.pose.orientation.z=math.sin(v['yaw']/2);pnt.pose.orientation.w=math.cos(v['yaw']/2);message.path.poses.append(pnt)
+     message.path.poses[-1].pose.orientation.z=math.sin(target['yaw']/2);message.path.poses[-1].pose.orientation.w=math.cos(target['yaw']/2)
+     message.controller_id='FollowPath';message.goal_checker_id='goal_checker'
+     print('[PATH] 提交已确认的预览路线，共 %d 个点；终点朝向 %.4f rad' % (len(message.path.poses),target['yaw']),flush=True)
+    else:
+     message=NavigateToPose.Goal(); message.pose=PoseStamped(); message.pose.header.frame_id='map'; message.pose.header.stamp=n.get_clock().now().to_msg()
+     message.pose.pose.position.x=target['x']; message.pose.pose.position.y=target['y']
+     message.pose.pose.orientation.z=math.sin(target['yaw']/2); message.pose.pose.orientation.w=math.cos(target['yaw']/2)
+     message.behavior_tree=str(root/'config/navigate.xml')
+    state='ACCEPT'
     execution_started=now; execution_deadline=now+args.max_runtime; next_countdown=now+5; deadline=execution_deadline
     print('[START] Walk 已稳定确认%s；最大运行时间 %.1fs，剩余 %.1fs；到时自动终止并停止速度发布。' % ('，未重复发送 standup' if walk_gate.request_before is None else '',args.max_runtime,args.max_runtime),flush=True)
     client.send_goal_async(message).add_done_callback(accepted)
@@ -189,7 +232,10 @@ def main():
     if sdk.get('motion')!='Walk' or sdk.get('motion_pending') is not False: fault('Walk mode lost'); continue
     if result and result.done():
      terminal=True
-     if result.result().status!=GoalStatus.STATUS_SUCCEEDED: fault('Nav2 did not succeed'); continue
+     if result.result().status!=GoalStatus.STATUS_SUCCEEDED:
+      response=result.result();detail=response.result
+      fault('[CONTROLLER_FAILED] Nav2 status=%s error_code=%s message=%s；详见 work/navigation_nav2.log' % (response.status,getattr(detail,'error_code','unavailable'),getattr(detail,'error_msg','unavailable')));continue
+     print('[STOPPING] 控制器报告到达，开始零速与实际停稳复核。',flush=True)
      state='STOPPING'; deadline=now+10; halt_at=now; stop_sequences.clear(); zero(); continue
     if state=='NAVIGATE' and raw is not None and now-raw_at<.15:
      values=(raw.linear.x,raw.linear.y,raw.linear.z,raw.angular.x,raw.angular.y,raw.angular.z)
@@ -210,7 +256,8 @@ def main():
     state='DONE'
   print(state+': '+(failed or 'goal reached and stopped'),flush=True)
  except KeyboardInterrupt: fault('operator interrupted')
- except Exception as e: fault(type(e).__name__+': '+str(e))
+ except Exception as e:
+  fault(type(e).__name__+': '+str(e));print('FAULT: '+failed,flush=True)
  finally:
   if goal and not terminal: goal.cancel_goal_async()
   shutdown=time.monotonic()+1

@@ -187,6 +187,7 @@ class PreviewPlanner:
             return dict(ok=True, preview_only=True, scene=self.scene, floor='lower',
                         map_id=identity[2], localization_session=identity[0], localization_epoch=identity[1],
                         start=start, goal=goal, points=points,
+                        _path=[dict(x=p.pose.position.x,y=p.pose.position.y,yaw=math.atan2(2*p.pose.orientation.w*p.pose.orientation.z,1-2*p.pose.orientation.z**2)) for p in path.poses],
                         length_m=sum(math.hypot(b[0]-a[0], b[1]-a[1]) for a,b in zip(points, points[1:])),
                         compute_sec=time.monotonic()-begin)
         except Exception:
