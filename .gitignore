@@ -25,3 +25,22 @@ __pycache__/
 
 # Generated format inspection report
 /docs/ORIN_格式检查报告.json
+
+# Imported source datasets and replay exports (runtime assets remain tracked
+# under assets/output/demo and maps).
+/assets/database/
+/bags/
+/recordings/
+/rosbag2_*/
+
+# Local scratch space, environments and editor state
+/tmp/
+/.cache/
+/.venv/
+/venv/
+/.idea/
+/.vscode/
+.DS_Store
+Thumbs.db
+*.swo
+*.exit
