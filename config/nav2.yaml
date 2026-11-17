@@ -73,7 +73,6 @@ controller_server:
       prune_distance: 1.0
       forward_prune_distance: 2.0
       critics:
-      - RotateToGoal
       - Oscillation
       - BaseObstacle
       - ObstacleFootprint
@@ -89,9 +88,6 @@ controller_server:
       ObstacleFootprint.scale: 0.05
       PathDist.scale: 16.0
       GoalDist.scale: 24.0
-      RotateToGoal.scale: 32.0
-      RotateToGoal.slowing_factor: 5.0
-      RotateToGoal.lookahead_time: -1.0
       Oscillation.oscillation_reset_dist: 0.05
       Oscillation.oscillation_reset_angle: 0.2
 global_costmap:

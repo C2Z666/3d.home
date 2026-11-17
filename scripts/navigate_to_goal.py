@@ -3,7 +3,7 @@
 import argparse,json,math,signal,sys,time,os,fcntl
 from pathlib import Path
 import yaml
-from navigation_control import HeadingAlignment, MotionGuard, rotation_clearance, quaternion_yaw, wrap, initial_path_heading, scan_input_state, POSITION_TOLERANCE, POSITION_RELEASE, replan_errors, settled_goal_action, RECOVERABLE_INPUT_PHASES
+from navigation_control import HeadingAlignment, MotionGuard, rotation_clearance, quaternion_yaw, wrap, initial_path_heading, scan_input_state, POSITION_TOLERANCE, POSITION_RELEASE, replan_errors, settled_goal_action, SettledGoalReview, RECOVERABLE_INPUT_PHASES
 
 MAX_LINEAR_SPEED = 0.15
 MAX_ANGULAR_SPEED = 0.4
@@ -37,6 +37,7 @@ def main():
  if not 0<=endpoint_tolerance<=POSITION_TOLERANCE:raise ValueError('planner endpoint tolerance must fit arrival tolerance')
  configured_goal=nav_cfg['controller_server']['ros__parameters']['goal_checker']['xy_goal_tolerance']
  if abs(configured_goal-POSITION_TOLERANCE)>1e-6:raise ValueError('controller and supervisor position tolerances disagree')
+ if 'RotateToGoal' in nav_cfg['controller_server']['ros__parameters']['FollowPath']['critics']:raise ValueError('Final yaw belongs to supervisor; disable DWB RotateToGoal')
  body=nav_cfg['local_costmap']['local_costmap']['ros__parameters']
  padding=body['footprint_padding']
  turn_radius=max(math.hypot(abs(x)+padding,abs(y)+padding) for x,y in json.loads(body['footprint']))
@@ -98,7 +99,7 @@ def main():
  execution_started=None; execution_deadline=None; next_countdown=None; runtime_expired=False
  state='WAIT'; deadline=time.monotonic()+60; goal=None; result=None; terminal=False; failed=''; stop_sequences=set(); halt_at=None
  scanhealth={}; health_at=-math.inf; next_wait_log=0.
- costmap=None; costmap_at=-math.inf; alignment=None; motion_guard=MotionGuard(); next_control_log=0.
+ costmap=None; costmap_at=-math.inf; alignment=None; motion_guard=MotionGuard(); settled_review=SettledGoalReview(); next_control_log=0.
  raw_controller=None; controller_at=-math.inf; command_missing_at=None
  pending_message=None; align_halt_at=None
  first_command_seen=False
@@ -189,7 +190,7 @@ def main():
   zero()
   if state=='INPUT_PAUSE':return
   paused_state=state;state='INPUT_PAUSE';stable_since=None
-  paused_at=now;motion_guard.reset()
+  paused_at=now;motion_guard.reset();settled_review.reset()
   paused_sequence=sdk.get('state_sequence');paused_stamp=loc.get('source_stamp')
   deadline=min(execution_deadline,now+30.)
   if goal and not terminal:goal.cancel_goal_async()
@@ -243,6 +244,7 @@ def main():
    fault('[REACQUIRE_INVALID_STATE] 路径执行尚未结束');return
   if reacquire_count>=3:
    fault('[REACQUIRE_LIMIT] 终点复核已重新接近3次，仍未收敛；'+reason);return
+  motion_guard.reset();settled_review.reset()
   reacquire_count+=1;state='REACQUIRE_STOP';halt_at=now;deadline=min(execution_deadline,now+10)
   raw=None;raw_at=-math.inf;stop_sequences.clear()
   print('[REACQUIRE_STOP] %s；第%d/3次，先停稳，再从当前位置重规划到原目标；总时限不重置。' % (reason,reacquire_count),flush=True)
@@ -275,9 +277,11 @@ def main():
   nonlocal next_control_log
   t=odom.twist.twist
   measured=(t.linear.x,t.linear.y,t.angular.z)
-  reason=motion_guard.check(vx,wz,measured,now,current_odom()[:2])
-  if reason.startswith('[NO_MOTION_RESPONSE]') and state=='NAVIGATE':
+  reason=motion_guard.check(vx,wz,measured,now,current_odom()[:2],current_odom()[2] if state=='NAVIGATE' else None)
+  if reason.startswith(('[NO_MOTION_RESPONSE]','[ZERO_TRANSLATION_DRIFT]','[ROUTE_SPIN]')) and state=='NAVIGATE':
    pause_inputs(reason,now);return
+  if reason.startswith('[ZERO_TRANSLATION_DRIFT]') and state in ('ALIGN_PATH','ALIGN_YAW'):
+   reacquire(reason,now);return
   if reason:fault(reason);return
   msg=Twist();msg.linear.x=vx;msg.angular.z=wz;vel.publish(msg)
   if now>=next_control_log:
@@ -431,7 +435,9 @@ def main():
     if sdk.get('motion')!='Walk' or sdk.get('motion_pending') is not False: fault('Walk mode lost'); continue
     wz,reason=alignment.command(current_pose(),now,current_odom(),odom.twist.twist.angular.z)
     if reason.startswith('[ALIGN_ODOM_DRIFT]'):reacquire(reason,now);continue
-    if reason.startswith('[ALIGN_GOAL_SHIFT]') and state=='ALIGN_YAW':reacquire(reason,now);continue
+    if reason.startswith('[ALIGN_GOAL_SHIFT]') and state=='ALIGN_YAW':
+     print('[GOAL_BOUNDARY_HOLD] '+reason+'；不立即消耗恢复次数，停稳后要求连续1秒新鲜数据复核。',flush=True)
+     state='STOPPING';deadline=min(execution_deadline,now+10);halt_at=now;stop_sequences.clear();settled_review.reset();zero();continue
     if reason:fault(reason);continue
     if wz==0.:
      if state=='ALIGN_PATH':
@@ -441,29 +447,29 @@ def main():
        alignment=None;submit_route()
       continue
      print('[STOPPING] 已进入朝向容差或提前制动；保持零速，停稳后分别复核位置与朝向。',flush=True)
-     state='STOPPING';deadline=now+10;halt_at=now;stop_sequences.clear();zero();continue
+     state='STOPPING';deadline=min(execution_deadline,now+10);halt_at=now;stop_sequences.clear();settled_review.reset();zero();continue
     reason=turn_clear(now)
     if reason:fault('[TURN_CLEARANCE] '+reason);continue
     align_halt_at=None
     output(0.,wz,now)
    elif state=='STOPPING':
     zero()
-    if terminal and now-halt_at>=.7 and not at_target() and stopped():
-     action=settled_goal_action(current_pose(),[target['x'],target['y'],target['yaw']])
-     print('[SETTLED_CHECK] action=%s distance=%.3fm yaw_error=%.3frad' % (action,math.hypot(pose.pose.position.x-target['x'],pose.pose.position.y-target['y']),wrap(target['yaw']-current_pose()[2])),flush=True)
-     if action=='ALIGN_YAW':
-      # Keep the original alignment time/progress budget and drift anchor.
-      state='ALIGN_YAW';deadline=execution_deadline;motion_guard.reset()
-      print('[ALIGN_YAW_RESUME] 位置合格，仅继续原地朝向微调，不重新走路线、不消耗重新接近次数。',flush=True)
-      continue
-     reacquire('[STOPPING_POSITION_SHIFT] 停稳后位置超过0.20m，重新接近目标',now);continue
-    # Terminal result is required; cancel acknowledgement alone is not sufficient.
-    if not terminal or now-halt_at<.7 or not at_target() or now-odom_at>.4: continue
-    t=odom.twist.twist
-    if not all(math.isfinite(v) and abs(v)<.03 for v in (t.linear.x,t.linear.y,t.angular.z)): stop_sequences.clear(); continue
-    if not all(isinstance(sdk.get(k),(int,float)) and math.isfinite(sdk[k]) and abs(sdk[k])<.03 for k in ('reported_forward_speed','reported_lateral_speed','reported_yaw_rate')) or sdk.get('command_zero') is not True: stop_sequences.clear(); continue
+    if not terminal or now-halt_at<.7:continue
+    pos=current_pose();stamp=(pose.header.stamp.sec,pose.header.stamp.nanosec)
+    stationary=stopped()
+    if not stationary:stop_sequences.clear()
+    action=settled_review.update(pos,[target['x'],target['y'],target['yaw']],now,stamp,stationary)
+    if action=='WAIT':continue
+    print('[SETTLED_CHECK] stable=1.0s action=%s distance=%.3fm yaw_error=%.3frad' % (action,math.hypot(pos[0]-target['x'],pos[1]-target['y']),wrap(target['yaw']-pos[2])),flush=True)
+    if action=='REPLAN':
+     reacquire('[STOPPING_POSITION_SHIFT] 停稳且连续1秒新鲜定位确认位置超过0.20m，重新接近目标',now);continue
+    if action=='ALIGN_YAW':
+     state='ALIGN_YAW';deadline=execution_deadline;motion_guard.reset()
+     print('[ALIGN_YAW_RESUME] 停稳连续复核位置合格，仅微调朝向，不消耗重新接近次数。',flush=True)
+     continue
+    # Stable stopped samples plus two distinct SDK status messages are required.
     stop_sequences.add(sdk.get('state_sequence'))
-    if len(stop_sequences)<2: continue
+    if len(stop_sequences)<2:continue
     state='DONE'
    elif state=='REACQUIRE_STOP':
     zero()

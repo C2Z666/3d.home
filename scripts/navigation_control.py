@@ -24,6 +24,24 @@ def settled_goal_action(pose, target):
     return 'ALIGN_YAW' if abs(wrap(target[2]-pose[2])) >= .13 else 'DONE'
 
 
+class SettledGoalReview:
+    """Classify only continuously stopped, fresh samples; no wider arrival tolerance."""
+    def __init__(self):self.reset()
+    def reset(self):
+        self.action=None;self.since=None;self.stamp=None;self.samples=0
+    def update(self, pose, target, now, stamp, is_stopped):
+        if not is_stopped:
+            self.reset();return 'WAIT'
+        if stamp==self.stamp:return 'WAIT'
+        self.stamp=stamp
+        action=settled_goal_action(pose,target)
+        if action!=self.action:
+            self.action=action;self.since=now;self.samples=1
+            return 'WAIT'
+        self.samples+=1
+        return action if self.samples>=2 and now-self.since>=1. else 'WAIT'
+
+
 def replan_errors(start, end, current, target, endpoint_tolerance):
     start_error=math.hypot(start[0]-current[0],start[1]-current[1])
     end_error=math.hypot(end[0]-target[0],end[1]-target[1])
@@ -95,7 +113,7 @@ class HeadingAlignment:
         if stats['odom_drift_m'] > .12:
             return 0., '[ALIGN_ODOM_DRIFT] 转向期间FAST-LIO机身位移超过0.12m，停车复核并重新规划；'+details
         if self.check_goal_position and stats['goal_distance_m'] > POSITION_RELEASE:
-            return 0., '[ALIGN_GOAL_SHIFT] 地图中终点距离超过%.2fm，需要重新接近目标；' % POSITION_RELEASE+details
+            return 0., '[ALIGN_GOAL_SHIFT] 地图中终点距离超过%.2fm，先保持零速并连续复核；' % POSITION_RELEASE+details
         if now-self.started >= ALIGN_TIMEOUT:
             return 0., '[ALIGN_TIMEOUT] 终点朝向调整超过45秒'
         if abs(error) <= self.best_angle-.05:
@@ -168,14 +186,34 @@ class MotionGuard:
         self.since = {}
         self.progress_anchor=None
         self.progress_at=None
+        self.zero_anchor=None;self.zero_since=None
+        self.spin_yaw=None;self.spin_angle=0.
 
     def reset(self):
         self.since.clear();self.progress_anchor=None;self.progress_at=None
+        self.zero_anchor=None;self.zero_since=None
+        self.spin_yaw=None;self.spin_angle=0.
 
-    def check(self, vx, wz, measured, now, position):
+    def check(self, vx, wz, measured, now, position, route_yaw=None):
         mx, my, mw = measured
         if not all(math.isfinite(v) for v in (vx, wz, mx, my, mw,*position)):
             return '[INVALID_MOTION] 指令或实测速度不是有限数值'
+        if route_yaw is not None and abs(vx)<.03 and abs(wz)>.15:
+            if not math.isfinite(route_yaw):return '[INVALID_MOTION] 里程计朝向无效'
+            if self.spin_yaw is not None:self.spin_angle+=abs(wrap(route_yaw-self.spin_yaw))
+            self.spin_yaw=route_yaw
+            if self.spin_angle>math.pi:
+                return '[ROUTE_SPIN] DWB低平移指令下累计转动超过半圈，停车重规划；vx=%.3f wz=%.3f angle=%.3frad' % (vx,wz,self.spin_angle)
+        else:
+            self.spin_yaw=None;self.spin_angle=0.
+        if abs(vx)<=.005:
+            if self.zero_anchor is None:
+                self.zero_anchor=tuple(position);self.zero_since=now
+            drift=math.hypot(position[0]-self.zero_anchor[0],position[1]-self.zero_anchor[1])
+            if now-self.zero_since>=2. and drift>.12:
+                return '[ZERO_TRANSLATION_DRIFT] 零平移请求下FAST-LIO净位移超过0.12m；duration=%.2fs displacement=%.3fm command=(%.3f,%.3f) measured=(%.3f,%.3f,%.3f)' % (now-self.zero_since,drift,vx,wz,mx,my,mw)
+        else:
+            self.zero_anchor=None;self.zero_since=None
         if vx>=.06:
             if self.progress_anchor is None:
                 self.progress_anchor=tuple(position);self.progress_at=now
