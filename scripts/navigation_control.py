@@ -14,6 +14,16 @@ ALIGN_TIMEOUT = 45.0
 ALIGN_PROGRESS_TIMEOUT = 12.0
 
 
+RECOVERABLE_INPUT_PHASES = frozenset(('ACCEPT','NAVIGATE','ALIGN_PATH','ALIGN_YAW',
+    'STOPPING','INPUT_PAUSE','REACQUIRE_STOP','REPLAN'))
+
+
+def settled_goal_action(pose, target):
+    if math.hypot(pose[0]-target[0],pose[1]-target[1]) > POSITION_RELEASE:
+        return 'REPLAN'
+    return 'ALIGN_YAW' if abs(wrap(target[2]-pose[2])) >= .13 else 'DONE'
+
+
 def replan_errors(start, end, current, target, endpoint_tolerance):
     start_error=math.hypot(start[0]-current[0],start[1]-current[1])
     end_error=math.hypot(end[0]-target[0],end[1]-target[1])
@@ -78,7 +88,7 @@ class HeadingAlignment:
                     map_alignment_shift_m=math.hypot(pose[0]-px,pose[1]-py),
                     goal_distance_m=math.hypot(pose[0]-self.target[0],pose[1]-self.target[1]))
 
-    def command(self, pose, now, odom_pose):
+    def command(self, pose, now, odom_pose, yaw_rate=0.):
         stats = self.diagnostics(pose,odom_pose)
         error = wrap(self.target[2]-pose[2])
         details = ' odom_drift=%.3fm map_alignment_shift=%.3fm goal_distance=%.3fm' % tuple(stats.values())
@@ -94,6 +104,12 @@ class HeadingAlignment:
             return 0., ''
         if now-self.progress_at >= ALIGN_PROGRESS_TIMEOUT:
             return 0., '[ALIGN_NO_PROGRESS] 终点朝向误差连续12秒没有改善0.05rad'
+        if self.check_goal_position:
+            # Brake before the tolerance boundary; do not reverse while coasting.
+            predicted = error - .25*yaw_rate
+            if error*yaw_rate > 0 and (error*predicted <= 0 or abs(predicted) <= YAW_TOLERANCE):
+                return 0., ''
+            return max(-ALIGN_TURN_CAP,min(ALIGN_TURN_CAP,.8*error)), ''
         return max(-ALIGN_TURN_CAP, min(ALIGN_TURN_CAP, ALIGN_GAIN*error)), ''
 
 

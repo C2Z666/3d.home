@@ -3,7 +3,7 @@
 import argparse,json,math,signal,sys,time,os,fcntl
 from pathlib import Path
 import yaml
-from navigation_control import HeadingAlignment, MotionGuard, rotation_clearance, quaternion_yaw, wrap, initial_path_heading, scan_input_state, POSITION_TOLERANCE, POSITION_RELEASE, replan_errors
+from navigation_control import HeadingAlignment, MotionGuard, rotation_clearance, quaternion_yaw, wrap, initial_path_heading, scan_input_state, POSITION_TOLERANCE, POSITION_RELEASE, replan_errors, settled_goal_action, RECOVERABLE_INPUT_PHASES
 
 MAX_LINEAR_SPEED = 0.15
 MAX_ANGULAR_SPEED = 0.4
@@ -327,7 +327,7 @@ def main():
                   and not loc.get('relocalizing') and scan_wait and geometry_ok
                   and '不一致' not in tf_block)
      why='TF=%s localization=%s scan_ready=%s scan_reason=%s scan_recoverable=%s geometry_ok=%s map_ok=%s ages(loc/pose/scan/odom/health)=%s' % (tf_block,loc.get('reason'),scan_ok,scan_reason,scan_wait,geometry_ok,loc.get('map_id')==map_id,[round(now-v,3) for v in (loc_at,pose_at,scan_at,odom_at,health_at)])
-     if recoverable and state in ('ACCEPT','NAVIGATE','ALIGN_PATH','ALIGN_YAW','STOPPING','INPUT_PAUSE'):
+     if recoverable and state in RECOVERABLE_INPUT_PHASES:
       pause_inputs(why,now);stable_since=None;continue
      fault('[LOCALIZATION_NOT_READY] '+why);continue
     if state=='INPUT_PAUSE':
@@ -345,7 +345,8 @@ def main():
       state=paused_state
       if state in ('ALIGN_PATH','ALIGN_YAW'):
        alignment.started+=now-paused_at;alignment.progress_at+=now-paused_at
-      if state=='STOPPING':halt_at=now;deadline=min(execution_deadline,now+10);stop_sequences.clear()
+      if state in ('STOPPING','REACQUIRE_STOP'):halt_at=now;deadline=min(execution_deadline,now+10);stop_sequences.clear()
+      if state=='REPLAN':deadline=min(execution_deadline,now+10)
      continue
    if state=='WAIT':
     zero()
@@ -428,7 +429,7 @@ def main():
       if now-command_missing_at>allowance:fault('[COMMAND_STREAM_LOST] DWB/速度平滑器持续%.1f秒没有新鲜输出；raw_age=%.2fs smoothed_age=%.2fs' % (allowance,now-controller_at,now-raw_at))
    elif state in ('ALIGN_PATH','ALIGN_YAW'):
     if sdk.get('motion')!='Walk' or sdk.get('motion_pending') is not False: fault('Walk mode lost'); continue
-    wz,reason=alignment.command(current_pose(),now,current_odom())
+    wz,reason=alignment.command(current_pose(),now,current_odom(),odom.twist.twist.angular.z)
     if reason.startswith('[ALIGN_ODOM_DRIFT]'):reacquire(reason,now);continue
     if reason.startswith('[ALIGN_GOAL_SHIFT]') and state=='ALIGN_YAW':reacquire(reason,now);continue
     if reason:fault(reason);continue
@@ -439,7 +440,7 @@ def main():
       if now-align_halt_at>=.3 and abs(odom.twist.twist.angular.z)<.05:
        alignment=None;submit_route()
       continue
-     print('[STOPPING] 位置与最终朝向均通过，开始零速与实际停稳复核。',flush=True)
+     print('[STOPPING] 已进入朝向容差或提前制动；保持零速，停稳后分别复核位置与朝向。',flush=True)
      state='STOPPING';deadline=now+10;halt_at=now;stop_sequences.clear();zero();continue
     reason=turn_clear(now)
     if reason:fault('[TURN_CLEARANCE] '+reason);continue
@@ -448,7 +449,14 @@ def main():
    elif state=='STOPPING':
     zero()
     if terminal and now-halt_at>=.7 and not at_target() and stopped():
-     reacquire('[STOPPING_GOAL_SHIFT] 停稳后地图终点位置或朝向超出容差',now);continue
+     action=settled_goal_action(current_pose(),[target['x'],target['y'],target['yaw']])
+     print('[SETTLED_CHECK] action=%s distance=%.3fm yaw_error=%.3frad' % (action,math.hypot(pose.pose.position.x-target['x'],pose.pose.position.y-target['y']),wrap(target['yaw']-current_pose()[2])),flush=True)
+     if action=='ALIGN_YAW':
+      # Keep the original alignment time/progress budget and drift anchor.
+      state='ALIGN_YAW';deadline=execution_deadline;motion_guard.reset()
+      print('[ALIGN_YAW_RESUME] 位置合格，仅继续原地朝向微调，不重新走路线、不消耗重新接近次数。',flush=True)
+      continue
+     reacquire('[STOPPING_POSITION_SHIFT] 停稳后位置超过0.20m，重新接近目标',now);continue
     # Terminal result is required; cancel acknowledgement alone is not sufficient.
     if not terminal or now-halt_at<.7 or not at_target() or now-odom_at>.4: continue
     t=odom.twist.twist
