@@ -61,6 +61,7 @@ def main():
     stop=threading.Event(); pending=[]; last_query=-math.inf
     visual_info={}; sdk={}; sdk_at=-math.inf; recovery_until=0.; recovery_after=-math.inf
     graph_error=''; graph_at=-math.inf; last_state_key=None
+    next_correction_log=0.
     def seconds(h): return h.stamp.sec+h.stamp.nanosec*1e-9
     def ros_seconds(): return node.get_clock().now().nanoseconds*1e-9
     def on_sdk(m):
@@ -133,6 +134,7 @@ def main():
             fault='odometry rotation discontinuity'; return
         previous=latest; latest=(t,O,m.header.stamp); received=time.monotonic(); history.append((t,O))
         if fusion.T is None: return
+        fusion.advance(O,t)
         M=fusion.T@O; P=planar(navigation_pose(O)); Q=planar(M)
         od=Odometry(); od.header.frame_id='nav_odom'; od.header.stamp=m.header.stamp; od.child_frame_id='nav_base'
         setpose(od.pose.pose,P)
@@ -170,7 +172,7 @@ def main():
             except Exception as e:
                 results.put((seconds(m.header),None,time.monotonic(),dict(stamp=seconds(m.header),reason='visual worker: '+str(e),compute_sec=time.monotonic()-begin)))
     def tick():
-        nonlocal sequence,fault,pending,visual_info,last_state_key
+        nonlocal sequence,fault,pending,visual_info,last_state_key,next_correction_log
         if time.monotonic()-graph_at>.5: audit_graph()
         fusion.expire(ros_seconds(),args.max_visual_age)
         if fusion.recovering:
@@ -204,11 +206,16 @@ def main():
         ready=bool(tracking and fusion.T is not None and not fusion.recovering)
         state='LOST' if not tracking else 'RELOCALIZING' if fusion.recovering else 'WAITING' if fusion.T is None else 'FUSED' if visual_fresh else 'ODOM_ONLY'
         reason=fault or ('FAST-LIO连续定位，等待有效视觉纠偏；导航可用' if state=='ODOM_ONLY' and ready else '视觉融合定位正常' if ready else fusion.reason)
-        data=dict(session=session,sequence=sequence,epoch=fusion.epoch,map_id=map_id,tracking_valid=bool(tracking),ready=ready,
+        data=dict(session=session,sequence=sequence,epoch=fusion.epoch,map_id=map_id,tracking_valid=bool(tracking),tracking_fault=fault,ready=ready,
                   mode=state,recovery_required=fusion.required,relocalizing=fusion.recovering,visual=visual_info,
                   visual_fresh=visual_fresh,last_rejection_reason=fusion.last_rejection_reason,
+                  correction=dict(fusion.correction,translation_rate_mps=fusion.translation_rate,rotation_rate_degps=math.degrees(fusion.rotation_rate),target_ttl_sec=fusion.target_ttl),
                   image_info=image_info,image_recent=time.monotonic()-image_at<1.,visual_age=visual_age,source_stamp=latest[0] if latest else None,reason=reason)
         key=(state,ready,fault)
+        if fusion.correction['active'] and time.monotonic()>=next_correction_log:
+            event=dict(event='VISUAL_CORRECTION',stamp=ros_seconds(),**data['correction'])
+            audit.info(json.dumps(event));print('[VISUAL_CORRECTION] '+json.dumps(event),flush=True)
+            next_correction_log=time.monotonic()+5.
         if key!=last_state_key:
             event=dict(event='LOCALIZATION_STATE',state=state,ready=ready,reason=reason,epoch=fusion.epoch,stamp=ros_seconds())
             audit.info(json.dumps(event,ensure_ascii=False));print('[LOCALIZATION] '+json.dumps(event,ensure_ascii=False),flush=True)

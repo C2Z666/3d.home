@@ -33,18 +33,31 @@ def initial_path_heading(points, pose):
 
 
 class HeadingAlignment:
-    def __init__(self, pose, target, now):
+    def __init__(self, pose, target, now, odom_pose, check_goal_position=True):
         self.target = target
         self.started = self.progress_at = now
         self.best_angle = abs(wrap(target[2]-pose[2]))
-        self.anchor = pose[:2]
+        self.anchor = pose[:]
+        self.odom_anchor = odom_pose[:]
+        self.check_goal_position = check_goal_position
 
-    def command(self, pose, now):
-        distance = math.hypot(pose[0]-self.target[0], pose[1]-self.target[1])
-        drift = math.hypot(pose[0]-self.anchor[0], pose[1]-self.anchor[1])
+    def diagnostics(self, pose, odom_pose):
+        dx,dy = odom_pose[0]-self.odom_anchor[0],odom_pose[1]-self.odom_anchor[1]
+        angle = self.anchor[2]-self.odom_anchor[2]
+        px = self.anchor[0]+math.cos(angle)*dx-math.sin(angle)*dy
+        py = self.anchor[1]+math.sin(angle)*dx+math.cos(angle)*dy
+        return dict(odom_drift_m=math.hypot(dx,dy),
+                    map_alignment_shift_m=math.hypot(pose[0]-px,pose[1]-py),
+                    goal_distance_m=math.hypot(pose[0]-self.target[0],pose[1]-self.target[1]))
+
+    def command(self, pose, now, odom_pose):
+        stats = self.diagnostics(pose,odom_pose)
         error = wrap(self.target[2]-pose[2])
-        if distance > POSITION_RELEASE or drift > .12:
-            return 0., '[ALIGN_POSITION_DRIFT] 转向期间位置偏离目标或转向起点，停车后重新规划'
+        details = ' odom_drift=%.3fm map_alignment_shift=%.3fm goal_distance=%.3fm' % tuple(stats.values())
+        if stats['odom_drift_m'] > .12:
+            return 0., '[ALIGN_ODOM_DRIFT] 转向期间FAST-LIO机身位移超过0.12m，停车检查；'+details
+        if self.check_goal_position and stats['goal_distance_m'] > POSITION_RELEASE:
+            return 0., '[ALIGN_GOAL_SHIFT] 地图中终点距离超过0.15m，需要重新接近目标；'+details
         if now-self.started >= ALIGN_TIMEOUT:
             return 0., '[ALIGN_TIMEOUT] 终点朝向调整超过45秒'
         if abs(error) <= self.best_angle-.05:

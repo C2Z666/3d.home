@@ -18,18 +18,30 @@ class FusionPolicy:
         self.reason = 'waiting for three consistent visual observations'
         self.delta_m = self.delta_deg = None
         self.last_rejection_reason = ''
+        # Observations select a target alignment; only odometry callbacks move
+        # the applied alignment. Rates therefore do not depend on camera FPS.
+        self.target = None
+        self.target_stamp = None
+        self.advance_stamp = None
+        self.translation_rate = .03  # m/s at the CURRENT robot, not odom origin
+        self.rotation_rate = math.radians(1.5)  # rad/s, full SO(3)
+        self.time_constant = 1.0
+        self.target_ttl = 1.5  # capture time, never result arrival time
+        self.correction = dict(active=False,step_m=0.,step_deg=0.,remaining_m=0.,remaining_deg=0.)
 
     def invalidate(self, reason):
         # A failed manual recovery must not permanently disable an existing
         # map alignment. Actual odometry faults are gated by localization_live.
         self.required = self.recovering = False
         self.candidates.clear()
+        self.target = None
         self.reason = self.last_rejection_reason = reason
 
     def request(self):
         self.epoch += 1
         self.required = self.recovering = True
         self.candidates.clear()
+        self.target = None
         self.delta_m = self.delta_deg = None
         self.reason = 'stationary relocalization: waiting for three consistent images'
 
@@ -51,6 +63,9 @@ class FusionPolicy:
             self.reason = 'duplicate or reversed visual timestamp'
             return False
         self.last_query = t
+        if not all(A.shape == (4,4) and np.isfinite(A).all() for A in (V,O)):
+            self.reason = 'invalid visual or odometry transform'
+            return False
         C = rigid(V @ np.linalg.inv(O))
         if self.T is not None:
             delta = np.linalg.inv(self.T @ O) @ V
@@ -61,6 +76,8 @@ class FusionPolicy:
                 self.reason = 'consistent visual candidates %d/3 within 2s' % len(self.candidates)
                 return False
             self.T = C
+            self.target = None
+            self.advance_stamp = None
             self.required = self.recovering = False
             self.candidates.clear()
         else:
@@ -71,15 +88,46 @@ class FusionPolicy:
                     return False
             else:
                 self.candidates.clear()
-            # Bound each accepted correction at the robot, independent of the
-            # arbitrary odometry origin. Never jump to a single far-away match.
-            alpha = min(.25, .03/max(self.delta_m, 1e-12), 1.5/max(self.delta_deg, 1e-12))
-            predicted = self.T @ O
-            target = np.eye(4)
-            target[:3,3] = (1-alpha)*predicted[:3,3]+alpha*V[:3,3]
-            target[:3,:3] = Slerp([0.,1.], Rotation.from_matrix([predicted[:3,:3],V[:3,:3]]))([alpha]).as_matrix()[0]
-            self.T = rigid(target @ np.linalg.inv(O))
+            self.target = C
+            self.target_stamp = t
         self.last_visual = t
         self.visual_stale = False
-        self.reason = 'accepted verified visual correction'
+        self.reason = 'accepted visual alignment; correction applied smoothly at odometry rate'
         return True
+
+    def advance(self, O, t):
+        """Slew map alignment, keeping raw FAST-LIO pose/velocity untouched.
+
+        Evaluate both transforms at this same odometry pose: rotation about a
+        distant map/odom origin must not create an unbounded position change.
+        Pauses never accumulate correction credit. An old accepted match is
+        not extrapolated indefinitely after the camera loses matching.
+        """
+        self.correction = dict(active=False,step_m=0.,step_deg=0.,remaining_m=0.,remaining_deg=0.)
+        if not math.isfinite(t) or (self.advance_stamp is not None and t <= self.advance_stamp):
+            return
+        dt = 0. if self.advance_stamp is None else min(.1,t-self.advance_stamp)
+        self.advance_stamp = t
+        if self.T is None or self.target is None or self.recovering:
+            return
+        age = t-self.target_stamp
+        if age > self.target_ttl:
+            self.target = None
+            return
+        if age < 0 or dt <= 0:
+            return
+        predicted, desired = self.T @ O, self.target @ O
+        distance = float(np.linalg.norm(desired[:3,3]-predicted[:3,3]))
+        angle = float(Rotation.from_matrix(predicted[:3,:3].T @ desired[:3,:3]).magnitude())
+        # Independent gains: a yaw discrepancy must not suppress a valid
+        # translation correction (and vice versa).
+        gain = -math.expm1(-dt/self.time_constant)
+        a = min(gain,self.translation_rate*dt/max(distance,1e-12))
+        b = min(gain,self.rotation_rate*dt/max(angle,1e-12))
+        corrected = np.eye(4)
+        corrected[:3,3] = predicted[:3,3]+a*(desired[:3,3]-predicted[:3,3])
+        corrected[:3,:3] = Slerp([0.,1.],Rotation.from_matrix([predicted[:3,:3],desired[:3,:3]]))([b]).as_matrix()[0]
+        self.T = rigid(corrected @ np.linalg.inv(O))
+        self.correction = dict(active=distance>1e-5 or angle>1e-5,
+                               step_m=a*distance,step_deg=math.degrees(b*angle),
+                               remaining_m=(1-a)*distance,remaining_deg=math.degrees((1-b)*angle))

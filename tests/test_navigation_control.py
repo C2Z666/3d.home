@@ -10,21 +10,21 @@ class NavigationControlTests(unittest.TestCase):
   route=[dict(x=0,y=0,yaw=0),dict(x=-.3,y=0,yaw=1.)]
   self.assertAlmostEqual(initial_path_heading(route,[0,0,0]),math.pi)
  def test_heading_can_escape_measured_speed_deadband(self):
-  align=HeadingAlignment([0,0,0],[0,0,1.],0)
-  self.assertEqual(align.command([0,0,0],1),(.3,''))
-  self.assertEqual(align.command([0,0,.95],2),(0.,''))
+  align=HeadingAlignment([0,0,0],[0,0,1.],0,[0,0,0])
+  self.assertEqual(align.command([0,0,0],1,[0,0,0]),(.3,''))
+  self.assertEqual(align.command([0,0,.95],2,[0,0,.95]),(0.,''))
  def test_wrap_and_negative_turn(self):
-  align=HeadingAlignment([0,0,3.1],[0,0,-2.8],0)
-  self.assertGreater(align.command([0,0,3.1],1)[0],0)
-  align=HeadingAlignment([0,0,0],[0,0,-1.],0)
-  self.assertEqual(align.command([0,0,0],1)[0],-.3)
+  align=HeadingAlignment([0,0,3.1],[0,0,-2.8],0,[0,0,3.1])
+  self.assertGreater(align.command([0,0,3.1],1,[0,0,3.1])[0],0)
+  align=HeadingAlignment([0,0,0],[0,0,-1.],0,[0,0,0])
+  self.assertEqual(align.command([0,0,0],1,[0,0,0])[0],-.3)
  def test_real_rotation_is_progress_even_after_15_seconds(self):
-  align=HeadingAlignment([0,0,0],[0,0,math.pi],0)
-  for t in range(21):self.assertEqual(align.command([0,0,t*.1],t)[1],'')
+  align=HeadingAlignment([0,0,0],[0,0,math.pi],0,[0,0,0])
+  for t in range(21):self.assertEqual(align.command([0,0,t*.1],t,[0,0,t*.1])[1],'')
  def test_stall_and_position_drift_do_not_report_success(self):
-  align=HeadingAlignment([0,0,0],[0,0,1.],0)
-  self.assertIn('ALIGN_NO_PROGRESS',align.command([0,0,0],12)[1])
-  self.assertIn('ALIGN_POSITION_DRIFT',align.command([-.13,0,0],1)[1])
+  align=HeadingAlignment([0,0,0],[0,0,1.],0,[0,0,0])
+  self.assertIn('ALIGN_NO_PROGRESS',align.command([0,0,0],12,[0,0,0])[1])
+  self.assertIn('ALIGN_ODOM_DRIFT',align.command([-.13,0,0],1,[-.13,0,0])[1])
  def test_no_response_reverse_and_wrong_turn_guards(self):
   for command,measured,key,t in [((.1,0),(0,0,0),'NO_MOTION_RESPONSE',3.1),((0,.3),(0,0,0),'NO_TURN_RESPONSE',3.1),((0,.3),(-.1,0,.3),'UNEXPECTED_REVERSE',.8),((0,.3),(0,0,-.2),'WRONG_TURN_DIRECTION',1.1)]:
    guard=MotionGuard();self.assertEqual(guard.check(*command,measured,0),'')
