@@ -26,14 +26,14 @@ class NavigationControlTests(unittest.TestCase):
   self.assertIn('ALIGN_NO_PROGRESS',align.command([0,0,0],12,[0,0,0])[1])
   self.assertIn('ALIGN_ODOM_DRIFT',align.command([-.13,0,0],1,[-.13,0,0])[1])
  def test_no_response_reverse_and_wrong_turn_guards(self):
-  for command,measured,key,t in [((.1,0),(0,0,0),'NO_MOTION_RESPONSE',3.1),((0,.3),(0,0,0),'NO_TURN_RESPONSE',3.1),((0,.3),(-.1,0,.3),'UNEXPECTED_REVERSE',.8),((0,.3),(0,0,-.2),'WRONG_TURN_DIRECTION',1.1)]:
-   guard=MotionGuard();self.assertEqual(guard.check(*command,measured,0),'')
-   self.assertIn(key,guard.check(*command,measured,t))
+  for command,measured,key,t in [((.1,0),(0,0,0),'NO_MOTION_RESPONSE',5.1),((0,.3),(0,0,0),'NO_TURN_RESPONSE',3.1),((0,.3),(-.1,0,.3),'UNEXPECTED_REVERSE',.8),((0,.3),(0,0,-.2),'WRONG_TURN_DIRECTION',1.1)]:
+   guard=MotionGuard();self.assertEqual(guard.check(*command,measured,0,(0,0)),'')
+   self.assertIn(key,guard.check(*command,measured,t,(0,0)))
  def test_brief_gait_oscillation_does_not_trip(self):
   guard=MotionGuard()
   for i in range(40):
    measured=(-.1 if i%2 else .1,0,.3)
-   self.assertEqual(guard.check(0,.3,measured,i*.1),'')
+   self.assertEqual(guard.check(0,.3,measured,i*.1,(0,0)),'')
  def test_costmap_obstacle_unknown_border_and_rotated_origin(self):
   grid=S(info=S(resolution=.05,width=80,height=80,origin=S(position=S(x=-2,y=-2),orientation=S(x=0,y=0,z=0,w=1))),data=[0]*6400)
   self.assertEqual(rotation_clearance(grid,(0,0),.58),'')

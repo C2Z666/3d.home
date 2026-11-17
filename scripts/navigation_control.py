@@ -5,13 +5,41 @@ not a measured-speed-plus-one-cycle clamp. The SDK bridge ramps that command.
 """
 import math
 
-POSITION_TOLERANCE = .10
-POSITION_RELEASE = .15
+POSITION_TOLERANCE = .15
+POSITION_RELEASE = .20
 YAW_TOLERANCE = .10
 ALIGN_GAIN = 2.0
 ALIGN_TURN_CAP = .30
 ALIGN_TIMEOUT = 45.0
 ALIGN_PROGRESS_TIMEOUT = 12.0
+
+
+def replan_errors(start, end, current, target, endpoint_tolerance):
+    start_error=math.hypot(start[0]-current[0],start[1]-current[1])
+    end_error=math.hypot(end[0]-target[0],end[1]-target[1])
+    reason=('REPLAN_START_CHANGED' if start_error>POSITION_RELEASE else
+            'REPLAN_ENDPOINT_MISMATCH' if end_error>endpoint_tolerance+1e-6 else '')
+    return reason,dict(start_error_m=start_error,end_error_m=end_error,
+                      start_limit_m=POSITION_RELEASE,end_limit_m=endpoint_tolerance)
+
+
+def scan_input_state(health):
+    """Return (usable, recoverable, explanation) for the cloud-scan producer.
+
+    Its 0.4s ready deadline can expire before the supervisor's 0.5s reception
+    deadline. That is a reason to hold zero and wait, not a permanent fault.
+    Explicit malformed clouds/frame errors must never use the stale fallback.
+    """
+    reason=str(health.get('reason') or '').strip()
+    transient=('stale cloud','no odometry bracket; no extrapolation',
+               'odometry gap','waiting for calibrated cloud and odometry')
+    if reason in transient:
+        return False,True,reason
+    if reason:
+        return False,False,reason
+    if health.get('ready') is True:
+        return True,True,'ready'
+    return False,True,'扫描暂时无新鲜输出，停车等待恢复'
 
 
 def wrap(angle):
@@ -57,7 +85,7 @@ class HeadingAlignment:
         if stats['odom_drift_m'] > .12:
             return 0., '[ALIGN_ODOM_DRIFT] 转向期间FAST-LIO机身位移超过0.12m，停车复核并重新规划；'+details
         if self.check_goal_position and stats['goal_distance_m'] > POSITION_RELEASE:
-            return 0., '[ALIGN_GOAL_SHIFT] 地图中终点距离超过0.15m，需要重新接近目标；'+details
+            return 0., '[ALIGN_GOAL_SHIFT] 地图中终点距离超过%.2fm，需要重新接近目标；' % POSITION_RELEASE+details
         if now-self.started >= ALIGN_TIMEOUT:
             return 0., '[ALIGN_TIMEOUT] 终点朝向调整超过45秒'
         if abs(error) <= self.best_angle-.05:
@@ -122,15 +150,29 @@ class MotionGuard:
     """
     def __init__(self):
         self.since = {}
+        self.progress_anchor=None
+        self.progress_at=None
 
-    def check(self, vx, wz, measured, now):
+    def reset(self):
+        self.since.clear();self.progress_anchor=None;self.progress_at=None
+
+    def check(self, vx, wz, measured, now, position):
         mx, my, mw = measured
-        if not all(math.isfinite(v) for v in (vx, wz, mx, my, mw)):
+        if not all(math.isfinite(v) for v in (vx, wz, mx, my, mw,*position)):
             return '[INVALID_MOTION] 指令或实测速度不是有限数值'
+        if vx>=.06:
+            if self.progress_anchor is None:
+                self.progress_anchor=tuple(position);self.progress_at=now
+            displacement=math.hypot(position[0]-self.progress_anchor[0],position[1]-self.progress_anchor[1])
+            if displacement>=.02:
+                self.progress_anchor=tuple(position);self.progress_at=now
+            elif now-self.progress_at>=5.:
+                return '[NO_MOTION_RESPONSE] 持续请求前进5秒但FAST-LIO净位移不足0.02m；command=(%.3f,%.3f) measured=(%.3f,%.3f,%.3f) displacement=%.4fm' % (vx,wz,mx,my,mw,displacement)
+        else:
+            self.progress_anchor=None;self.progress_at=None
         conditions = {
             'UNEXPECTED_REVERSE': (vx >= 0 and mx < -.05, .7, '未请求后退但实测持续后退'),
             'WRONG_TURN_DIRECTION': (abs(wz) >= .10 and wz*mw < -.005, 1., '实测转向持续与指令相反'),
-            'NO_MOTION_RESPONSE': (vx >= .06 and math.hypot(mx, my) <= .025 and abs(mw) < .05, 3., '持续请求前进但机身没有进展'),
             'NO_TURN_RESPONSE': (abs(wz) >= .10 and abs(mw) < .025, 3., '持续请求转向但机身没有转动'),
         }
         for key, (condition, duration, reason) in conditions.items():

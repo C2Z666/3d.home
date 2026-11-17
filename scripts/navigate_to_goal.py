@@ -3,7 +3,7 @@
 import argparse,json,math,signal,sys,time,os,fcntl
 from pathlib import Path
 import yaml
-from navigation_control import HeadingAlignment, MotionGuard, rotation_clearance, quaternion_yaw, wrap, initial_path_heading
+from navigation_control import HeadingAlignment, MotionGuard, rotation_clearance, quaternion_yaw, wrap, initial_path_heading, scan_input_state, POSITION_TOLERANCE, POSITION_RELEASE, replan_errors
 
 MAX_LINEAR_SPEED = 0.15
 MAX_ANGULAR_SPEED = 0.4
@@ -33,6 +33,10 @@ class WalkGate:
 def main():
  root=Path(__file__).resolve().parents[1]; cfg=yaml.safe_load((root/'config/site.yaml').read_text())
  nav_cfg=yaml.safe_load((root/'config/nav2.yaml').read_text())
+ endpoint_tolerance=float(nav_cfg['planner_server']['ros__parameters']['GridBased']['tolerance'])
+ if not 0<=endpoint_tolerance<=POSITION_TOLERANCE:raise ValueError('planner endpoint tolerance must fit arrival tolerance')
+ configured_goal=nav_cfg['controller_server']['ros__parameters']['goal_checker']['xy_goal_tolerance']
+ if abs(configured_goal-POSITION_TOLERANCE)>1e-6:raise ValueError('controller and supervisor position tolerances disagree')
  body=nav_cfg['local_costmap']['local_costmap']['ros__parameters']
  padding=body['footprint_padding']
  turn_radius=max(math.hypot(abs(x)+padding,abs(y)+padding) for x,y in json.loads(body['footprint']))
@@ -171,6 +175,7 @@ def main():
  def submit_route():
   nonlocal state,raw,raw_at,command_missing_at,first_command_seen,route_reply
   state='ACCEPT';raw=None;raw_at=-math.inf;command_missing_at=None;first_command_seen=False
+  motion_guard.reset()
   # Initial alignment can take seconds. Never submit a path with that old TF time.
   stamp=n.get_clock().now().to_msg()
   if approved:
@@ -184,7 +189,7 @@ def main():
   zero()
   if state=='INPUT_PAUSE':return
   paused_state=state;state='INPUT_PAUSE';stable_since=None
-  paused_at=now;motion_guard.since.clear()
+  paused_at=now;motion_guard.reset()
   paused_sequence=sdk.get('state_sequence');paused_stamp=loc.get('source_stamp')
   deadline=min(execution_deadline,now+30.)
   if goal and not terminal:goal.cancel_goal_async()
@@ -195,7 +200,7 @@ def main():
    and isinstance(sdk.get('state_age_sec'),(int,float)) and 0<=sdk['state_age_sec']<2)
  def localization_safe(now):
   if loc.get('map_id')!=map_id: return False
-  if not (now-loc_at<.4 and loc.get('ready') is True and now-pose_at<.4 and now-scan_at<.5 and now-odom_at<.4 and now-health_at<.5 and scanhealth.get('ready') is True): return False
+  if not (now-loc_at<.4 and loc.get('ready') is True and now-pose_at<.4 and now-scan_at<.5 and now-odom_at<.4 and now-health_at<.5 and scan_input_state(scanhealth)[0]): return False
   if pose is None: return False
   q=pose.pose.orientation
   tilt=2*math.acos(min(1.,math.sqrt(q.w*q.w+q.z*q.z)))
@@ -203,7 +208,7 @@ def main():
  def at_target():
   q=pose.pose.orientation; yaw=math.atan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z))
   angle=math.atan2(math.sin(yaw-target['yaw']),math.cos(yaw-target['yaw']))
-  return math.hypot(pose.pose.position.x-target['x'],pose.pose.position.y-target['y'])<.13 and abs(angle)<.13
+  return math.hypot(pose.pose.position.x-target['x'],pose.pose.position.y-target['y'])<=POSITION_RELEASE and abs(angle)<.13
  def tf_reason():
   try:
    t=tf_buffer.lookup_transform('map','nav_base',Time())
@@ -270,7 +275,9 @@ def main():
   nonlocal next_control_log
   t=odom.twist.twist
   measured=(t.linear.x,t.linear.y,t.angular.z)
-  reason=motion_guard.check(vx,wz,measured,now)
+  reason=motion_guard.check(vx,wz,measured,now,current_odom()[:2])
+  if reason.startswith('[NO_MOTION_RESPONSE]') and state=='NAVIGATE':
+   pause_inputs(reason,now);return
   if reason:fault(reason);return
   msg=Twist();msg.linear.x=vx;msg.angular.z=wz;vel.publish(msg)
   if now>=next_control_log:
@@ -282,7 +289,7 @@ def main():
     print('[ALIGN_METRICS] '+json.dumps(alignment.diagnostics(pos,current_odom())),flush=True)
    next_control_log=now+1
  print('Navigating to map goal: '+str(target),flush=True)
- print('[CONTROLLER] DWB StandardTrajectoryGenerator -> OPEN_LOOP smoother -> supervisor -> SDK bridge; position=0.10m, final_yaw=0.10rad, turn_cap=0.30rad/s; progress includes rotation.',flush=True)
+ print('[CONTROLLER] DWB StandardTrajectoryGenerator -> OPEN_LOOP smoother -> supervisor -> SDK bridge; position_acquire=0.15m, position_settle=0.20m, final_yaw=0.10rad, turn_cap=0.30rad/s; progress includes rotation.',flush=True)
  print('[LIMIT] max-runtime=%.1fs; starts at goal submission, includes acceptance/navigation/stopping; countdown every 5s.' % args.max_runtime,flush=True)
  try:
   while rclpy.ok() and state not in ('FAULT','DONE'):
@@ -315,10 +322,11 @@ def main():
      # height/tilt, explicit odometry fault, or an invalid sensor status.
      q=pose.pose.orientation if pose else None
      geometry_ok=q is not None and 2*math.acos(min(1.,math.sqrt(q.w*q.w+q.z*q.z)))<math.radians(10) and abs(pose.pose.position.z-target['z'])<.3
+     scan_ok,scan_wait,scan_reason=scan_input_state(scanhealth)
      recoverable=(loc.get('map_id')==map_id and loc.get('mode') in ('FUSED','ODOM_ONLY','LOST')
-                  and not loc.get('relocalizing') and scanhealth.get('ready') is True and geometry_ok
+                  and not loc.get('relocalizing') and scan_wait and geometry_ok
                   and '不一致' not in tf_block)
-     why='TF=%s localization=%s ages(loc/pose/scan/odom/health)=%s' % (tf_block,loc.get('reason'),[round(now-v,3) for v in (loc_at,pose_at,scan_at,odom_at,health_at)])
+     why='TF=%s localization=%s scan_ready=%s scan_reason=%s scan_recoverable=%s geometry_ok=%s map_ok=%s ages(loc/pose/scan/odom/health)=%s' % (tf_block,loc.get('reason'),scan_ok,scan_reason,scan_wait,geometry_ok,loc.get('map_id')==map_id,[round(now-v,3) for v in (loc_at,pose_at,scan_at,odom_at,health_at)])
      if recoverable and state in ('ACCEPT','NAVIGATE','ALIGN_PATH','ALIGN_YAW','STOPPING','INPUT_PAUSE'):
       pause_inputs(why,now);stable_since=None;continue
      fault('[LOCALIZATION_NOT_READY] '+why);continue
@@ -398,7 +406,7 @@ def main():
       response=result.result();detail=response.result
       fault('[CONTROLLER_FAILED] Nav2 status=%s error_code=%s message=%s；详见 work/navigation_nav2.log' % (response.status,getattr(detail,'error_code','unavailable'),getattr(detail,'error_msg','unavailable')));continue
      pos=current_pose()
-     if math.hypot(pos[0]-target['x'],pos[1]-target['y'])>.13:
+     if math.hypot(pos[0]-target['x'],pos[1]-target['y'])>POSITION_RELEASE:
       reacquire('[POSITION_NOT_REACHED] DWB报告到达，但融合定位终点距离未通过复核',now);continue
      alignment=HeadingAlignment(pos,[target['x'],target['y'],target['yaw']],now,current_odom())
      state='ALIGN_YAW';zero()
@@ -456,7 +464,7 @@ def main():
     stop_sequences.add(sdk.get('state_sequence'))
     if len(stop_sequences)<2:continue
     pos=current_pose()
-    if math.hypot(pos[0]-target['x'],pos[1]-target['y'])<=.10:
+    if math.hypot(pos[0]-target['x'],pos[1]-target['y'])<=POSITION_TOLERANCE:
      alignment=HeadingAlignment(pos,[target['x'],target['y'],target['yaw']],now,current_odom())
      state='ALIGN_YAW';deadline=execution_deadline;continue
     if not approved:
@@ -467,7 +475,10 @@ def main():
     request.goal.header.stamp=n.get_clock().now().to_msg()
     request.goal.pose.position.x=target['x'];request.goal.pose.position.y=target['y']
     request.goal.pose.orientation.z=math.sin(target['yaw']/2);request.goal.pose.orientation.w=math.cos(target['yaw']/2)
-    request.use_start=False;request.planner_id='GridBased'
+    request.start=PoseStamped();request.start.header=request.goal.header
+    request.start.pose.position.x=pos[0];request.start.pose.position.y=pos[1]
+    request.start.pose.orientation.z=math.sin(pos[2]/2);request.start.pose.orientation.w=math.cos(pos[2]/2)
+    request.use_start=True;request.planner_id='GridBased'
     planner_goal=None;planner_result=None;planner_reply=planner.send_goal_async(request)
     state='REPLAN';deadline=min(execution_deadline,now+10)
     print('[REPLAN] 已停稳，使用当前融合位置、当前代价地图重新规划到原目标。',flush=True)
@@ -485,8 +496,10 @@ def main():
      fault('[REPLAN_INVALID] 新路线坐标无效');continue
     endpoint=path.poses[-1].pose.position
     startpoint=path.poses[0].pose.position;pos=current_pose()
-    if math.hypot(endpoint.x-target['x'],endpoint.y-target['y'])>.01 or math.hypot(startpoint.x-pos[0],startpoint.y-pos[1])>.15:
-     fault('[REPLAN_STALE] 新路线起终点未通过复核');continue
+    replan_reason,errors=replan_errors((startpoint.x,startpoint.y),(endpoint.x,endpoint.y),pos,(target['x'],target['y']),endpoint_tolerance)
+    print('[REPLAN_CHECK] '+json.dumps(errors),flush=True)
+    if replan_reason:
+     reacquire('['+replan_reason+'] '+json.dumps(errors),now);continue
     pending_message.path=path
     pending_message.path.poses[-1].pose.orientation=request.goal.pose.orientation
     result=None;goal=None;terminal=False;deadline=execution_deadline;alignment=None

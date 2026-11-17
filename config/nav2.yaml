@@ -38,7 +38,7 @@ controller_server:
       movement_time_allowance: 20.0
     goal_checker:
       plugin: nav2_controller::PositionGoalChecker
-      xy_goal_tolerance: 0.1
+      xy_goal_tolerance: 0.15
       stateful: false
     FollowPath:
       plugin: dwb_core::DWBLocalPlanner
@@ -66,7 +66,7 @@ controller_server:
       discretize_by_time: true
       time_granularity: 0.1
       transform_tolerance: 0.3
-      xy_goal_tolerance: 0.1
+      xy_goal_tolerance: 0.15
       trans_stopped_velocity: 0.03
       short_circuit_trajectory_evaluation: true
       prune_plan: true

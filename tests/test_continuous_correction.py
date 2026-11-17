@@ -79,6 +79,6 @@ class ContinuousCorrectionTests(unittest.TestCase):
 
     def test_final_goal_shift_requests_reacquisition_not_odom_fault(self):
         a=HeadingAlignment([0,0,0],[0,0,2.5],0,[10,5,1.])
-        self.assertIn('ALIGN_GOAL_SHIFT',a.command([.16,0,1.],5,[10,5,2.])[1])
+        self.assertIn('ALIGN_GOAL_SHIFT',a.command([.21,0,1.],5,[10,5,2.])[1])
 
 if __name__=='__main__':unittest.main()
