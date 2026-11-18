@@ -1,0 +1,58 @@
+/**:
+  ros__parameters:
+    feature_extract_enable: false
+    point_filter_num: 3
+    max_iteration: 4
+    filter_size_surf: 0.15
+    filter_size_map: 0.2
+    cube_side_length: 200.0
+    runtime_pos_log_enable: false
+    map_file_path: ./d1_airy_map.pcd
+    d1:
+      extrinsics_confirmed: true
+      extrinsics_source: /ota/calibration_results.yaml sha256=ab95f6dfeebb331a169d50d913fb7a7d37b991d6228d5d15e1f1551bffd7b773;
+        matches offline calibration; SVD as fastlio_video.py
+    common:
+      lid_topic: /front_lidar
+      imu_topic: /front_lidar/imu
+      time_sync_en: false
+      time_offset_lidar_to_imu: 0.0
+    preprocess:
+      lidar_type: 5
+      scan_line: 96
+      scan_rate: 10
+      timestamp_unit: 0
+      blind: 0.3
+    mapping:
+      acc_cov: 0.1
+      gyr_cov: 0.1
+      b_acc_cov: 0.0001
+      b_gyr_cov: 0.0001
+      fov_degree: 360.0
+      det_range: 30.0
+      extrinsic_est_en: false
+      extrinsic_R:
+      - -0.006794552449357345
+      - -0.9999755844847189
+      - -0.0016323270071202818
+      - -0.9999638095030334
+      - 0.006802812132126174
+      - -0.0051089559868266205
+      - 0.005119935663001296
+      - 0.0015975548629807265
+      - -0.9999856169351972
+      extrinsic_T:
+      - 0.00425
+      - 0.00418
+      - -0.00446
+    publish:
+      path_en: true
+      effect_map_en: false
+      map_en: false
+      scan_publish_en: true
+      dense_publish_en: false
+      scan_bodyframe_pub_en: true
+    pcd_save:
+      pcd_save_en: false
+      interval: -1
+    use_sim_time: false

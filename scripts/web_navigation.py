@@ -57,6 +57,13 @@ class NavigationManager:
                 log.write(formatted+'\n');print('[NAV '+task_id[:8]+'] '+line,flush=True)
                 with self.lock:
                     self.lines.append(formatted)
+                    if line.startswith('[NAV_EVENT] '):
+                        try:
+                            event=json.loads(line[len('[NAV_EVENT] '):])
+                            if event.get('task_id')==task_id:
+                                phase=event['state'];display={'WAIT':'PREPARING','ACCEPT':'RUNNING','NAVIGATE':'RUNNING','ALIGN_PATH':'ALIGNING_PATH','ALIGN_YAW':'ALIGNING','REACQUIRE_STOP':'REACQUIRING','REPLAN':'REPLANNING','DONE':'STOPPING','FAULT':'STOPPING'}.get(phase,phase)
+                                self.task.update(state=display,phase=phase,recovery=event.get('recovery'))
+                        except (ValueError,KeyError):pass
                     if line.startswith('[START]'):
                         self.started_mono=time.monotonic();self.task.update(state='RUNNING',started_at=time.time(),reason=line)
                     elif line.startswith('[ALIGN_YAW]'):self.task.update(state='ALIGNING',reason=line)
@@ -95,7 +102,16 @@ class NavigationManager:
             task=dict(self.task) if self.task else None
             if task and self.started_mono is not None:
                 end=self.finished_mono if self.finished_mono is not None else time.monotonic();task['remaining_sec']=max(0.,task['max_runtime']-(end-self.started_mono))
-            return dict(ok=True,task=task,logs=list(self.lines),active=self.process is not None and self.process.poll() is None)
+            telemetry=None
+            if task:
+                try:
+                    p=self.directory/(task['task_id']+'.telemetry.json')
+                    if p.stat().st_size<=2*1024*1024:
+                        value=json.loads(p.read_text())
+                        if value.get('task_id')==task['task_id']:
+                            telemetry=value;telemetry['fresh']=0<=time.time()-value.get('updated_at',0)<2
+                except (OSError,ValueError):pass
+            return dict(ok=True,task=task,telemetry=telemetry,logs=list(self.lines),active=self.process is not None and self.process.poll() is None)
 
     def close(self):
         with self.lock:

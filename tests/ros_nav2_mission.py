@@ -114,7 +114,7 @@ try:
    elif client.service_is_ready():pending[name]=client.call_async(GetState.Request())
  if len(active)<5:raise AssertionError('Nav2 not active '+repr(active)+' '+(W/'nav2.log').read_text()[-8000:])
  reports['nav2_lifecycle_active']=sorted(active)
- for case in ('goal_reached','localization_loss','runtime_limit','approved_path','approved_turn','behind_path','curved_path','slow_turn','turn_stall','unexpected_reverse','operator_cancel','tf_loss','turn_obstacle','visual_shift_turn','terminal_shift','tf_transient','tf_transient_turn','turn_inflation','turn_drift','turn_drift_path','motion_retry'):
+ for case in ('goal_reached','localization_loss','runtime_limit','approved_path','approved_turn','behind_path','curved_path','slow_turn','turn_stall','unexpected_reverse','operator_cancel','tf_loss','turn_obstacle','visual_shift_turn','terminal_shift','tf_transient','tf_transient_turn','turn_inflation','turn_drift','turn_drift_path','motion_retry','data_retries'):
   if os.environ.get('D1_TEST_CASES') and case not in os.environ['D1_TEST_CASES'].split(','):continue
   current_case=case;tf_available=True;obstacle=False;x=y=yaw=0.;actual_vx=actual_wz=0.;motion='Walk';ready=True;command=Twist();request=confirmed=0;map_dx=0.;shift_enabled=False;drift_enabled=False
   for _ in range(30):step()
@@ -129,10 +129,10 @@ try:
    assert f.done();n.destroy_client(c)
   for _ in range(30):step()
   drift_enabled=case in ('turn_drift','turn_drift_path')
-  target_x=3. if case=='runtime_limit' else .02 if case in ('approved_turn','slow_turn','turn_stall','unexpected_reverse','turn_obstacle','tf_transient_turn','turn_inflation','turn_drift') else -.5 if case in ('behind_path','visual_shift_turn','turn_drift_path') else .65 if case=='curved_path' else .55
+  target_x=3.0 if case=='data_retries' else 3. if case=='runtime_limit' else .02 if case in ('approved_turn','slow_turn','turn_stall','unexpected_reverse','turn_obstacle','tf_transient_turn','turn_inflation','turn_drift') else -.5 if case in ('behind_path','visual_shift_turn','turn_drift_path') else .65 if case=='curved_path' else .55
   target_y=.1 if case=='behind_path' else .6 if case=='curved_path' else 0.
   target_yaw=2.8 if case=='tf_transient_turn' else 2. if case=='terminal_shift' else math.pi if case in ('slow_turn','visual_shift_turn','turn_drift','turn_drift_path') else 1. if case in ('approved_turn','turn_stall','unexpected_reverse','behind_path','turn_obstacle','turn_inflation') else math.pi/2 if case=='curved_path' else 0.
-  runtime=60. if case in ('visual_shift_turn','terminal_shift','tf_transient_turn','turn_drift','turn_drift_path') else 30. if case in ('behind_path','curved_path','slow_turn','tf_transient','motion_retry') else 10.
+  runtime=60. if case=='data_retries' else 60. if case in ('visual_shift_turn','terminal_shift','tf_transient_turn','turn_drift','turn_drift_path') else 30. if case in ('behind_path','curved_path','slow_turn','tf_transient','motion_retry') else 10.
   args=['--live','--x',str(target_x),'--y',str(target_y),'--yaw',str(target_yaw),'--max-runtime',str(runtime)]
   route=R/'work/approved_test.path.json';route.parent.mkdir(exist_ok=True)
   if case=='curved_path':
@@ -152,6 +152,9 @@ try:
    if case=='terminal_shift' and '[ALIGN_YAW]' in (W/(case+'.log')).read_text():shift_enabled=True
    if case in ('turn_drift','turn_drift_path') and '[REACQUIRE_STOP]' in (W/(case+'.log')).read_text():drift_enabled=False
    if case=='runtime_limit' and timeout_seen is None and 'MAX_RUNTIME_EXCEEDED' in (W/(case+'.log')).read_text():timeout_seen=time.monotonic()
+   if case=='data_retries':
+    elapsed=time.monotonic()-start
+    tf_available=not any(t<elapsed<t+.8 for t in (8.,12.,16.,20.))
    if case=='tf_loss' and x>.05:tf_available=False
    if case in ('tf_transient','tf_transient_turn'):
     trigger=abs(yaw)>.3 if case=='tf_transient_turn' else x>.05
@@ -190,6 +193,9 @@ try:
    assert 'DONE: goal reached and stopped' in log,log
    if case in ('approved_path','approved_turn'):assert '[PATH]' in log and '[ACCEPTED]' in log and '[STOPPING]' in log,log
    if case=='visual_shift_turn':assert abs(map_dx)>.12 and '[ALIGN_METRICS]' in log,log
+   if case=='data_retries':
+    assert log.count('[INPUT_RECOVERED]')>=4,log
+    assert '[POSITION_RECOVERY_LIMIT]' not in log and '[MOTION_RECOVERY_LIMIT]' not in log,log
    if case=='motion_retry':assert '[NO_MOTION_RESPONSE]' in log and '[INPUT_RECOVERED]' in log and '[REPLAN_READY]' in log,log
    if case=='terminal_shift':assert '[REACQUIRE_STOP]' in log and '[REPLAN_READY]' in log,log
    if case in ('turn_drift','turn_drift_path'):assert '[ALIGN_ODOM_DRIFT]' in log and '[REACQUIRE_STOP]' in log and '[REPLAN_READY]' in log,log

@@ -3,9 +3,9 @@
 import argparse,os,signal,subprocess,time
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
-FAST=Path("/home/robot/zhangzhang/fastlio_live")
+FAST=ROOT
 SPECS=[
- ("fastlio",FAST/"run_fastlio.sh",FAST/"work",str(FAST/"d1_airy_live.yaml")),
+ ("fastlio",ROOT/"scripts/run_fastlio.sh",ROOT/"work",str(ROOT/"config/fastlio_live.yaml")),
  ("localization",ROOT/"scripts/run_localization.sh",ROOT/"work",str(ROOT/"scripts/localization_live.py")),
  ("cloud_scan",ROOT/"scripts/run_cloud_scan.sh",ROOT/"work",str(ROOT/"scripts/cloud_scan.py")),
 ]

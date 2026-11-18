@@ -15,6 +15,13 @@ class WebNavigationTests(unittest.TestCase):
   self.m=NavigationManager(self.root,SimpleNamespace(node=self.node,snapshot=lambda:self.snap))
   self.plan=dict(map_id='m',localization_session='s',localization_epoch=0,scene='old',floor='lower',start=dict(x=0.,y=0.,yaw=0.),goal=dict(x=.5,y=0.,yaw=.2),points=[[0,0],[.5,0]],_path=[dict(x=0.,y=0.,yaw=0.),dict(x=.5,y=0.,yaw=.2)])
   self.token=self.m.register(self.plan)['plan_id'];self.data=dict(plan_id=self.token,confirmed=True,max_runtime=10.)
+ def test_telemetry_never_uses_another_task(self):
+  self.m.task=dict(task_id='a',state='RUNNING')
+  p=self.m.directory/'a.telemetry.json'
+  p.write_text(json.dumps(dict(task_id='b',updated_at=time.time())))
+  self.assertIsNone(self.m.snapshot()['telemetry'])
+  p.write_text(json.dumps(dict(task_id='a',updated_at=time.time()-10)))
+  self.assertFalse(self.m.snapshot()['telemetry']['fresh'])
  def tearDown(self):self.tmp.cleanup()
  def test_confirmation_and_runtime_validation(self):
   for d in [dict(self.data,confirmed=False),dict(self.data,max_runtime=True),dict(self.data,max_runtime=0),dict(self.data,max_runtime=float('inf'))]:

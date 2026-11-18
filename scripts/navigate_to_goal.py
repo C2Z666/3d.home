@@ -2,7 +2,8 @@
 """Navigate to an explicit map-frame goal and finish after stopping."""
 import argparse,json,math,signal,sys,time,os,fcntl
 from pathlib import Path
-import yaml
+import yaml,hashlib
+from mission_runtime import RecoveryBudget, MissionTrace
 from navigation_control import HeadingAlignment, MotionGuard, rotation_clearance, quaternion_yaw, wrap, initial_path_heading, scan_input_state, POSITION_TOLERANCE, POSITION_RELEASE, replan_errors, settled_goal_action, SettledGoalReview, RECOVERABLE_INPUT_PHASES
 
 MAX_LINEAR_SPEED = 0.15
@@ -71,6 +72,7 @@ def main():
   p.error('review the selected map and current scan, then run validate_site.py')
  import rclpy
  from rclpy.node import Node
+ from rclpy.qos import qos_profile_sensor_data
  from rclpy.action import ActionClient
  from geometry_msgs.msg import PoseStamped,Twist
  from nav_msgs.msg import Odometry,OccupancyGrid
@@ -98,7 +100,7 @@ def main():
  sdk_identity=None; loc_identity=None; walk_gate=WalkGate()
  execution_started=None; execution_deadline=None; next_countdown=None; runtime_expired=False
  state='WAIT'; deadline=time.monotonic()+60; goal=None; result=None; terminal=False; failed=''; stop_sequences=set(); halt_at=None
- scanhealth={}; health_at=-math.inf; next_wait_log=0.
+ scan_stamp=None;scanhealth={}; health_at=-math.inf; next_wait_log=0.
  costmap=None; costmap_at=-math.inf; alignment=None; motion_guard=MotionGuard(); settled_review=SettledGoalReview(); next_control_log=0.
  raw_controller=None; controller_at=-math.inf; command_missing_at=None
  pending_message=None; align_halt_at=None
@@ -106,12 +108,62 @@ def main():
  reacquire_count=0; planner_goal=None; planner_reply=None; planner_result=None
  route_reply=None; paused_state=None; stable_since=None; paused_sequence=None; paused_stamp=None; paused_at=None
  next_turn_check_log=0.
+ budget=RecoveryBudget();pause_category='data';next_sample=0.;last_sent=(0.,0.);raw_lio=None;raw_lio_at=-math.inf
+ task_id=args.path_file.name.removesuffix('.path.json') if args.path_file else 'cli-'+str(os.getpid())
+ trace=MissionTrace(root/'work/navigation',task_id)
+ trace.emit('mission',goal=target,scene=args.scene,map_id=map_id,max_runtime=args.max_runtime,source_hashes={name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in ('scripts/navigate_to_goal.py','scripts/mission_runtime.py','config/calibration.yaml','config/nav2.yaml')},unavailable_fields=['bridge_actual_command'])
+ def transition(next_state,reason=''):
+  nonlocal state,raw,raw_at,command_missing_at,first_command_seen
+  old=state
+  if old==next_state:return
+  if next_state in ('FAULT','INPUT_PAUSE','REACQUIRE_STOP','REPLAN','STOPPING','DONE','ACCEPT'):
+   zero();raw=None;raw_at=-math.inf
+  if next_state in ('ACCEPT','REACQUIRE_STOP'):
+   motion_guard.reset();command_missing_at=None;first_command_seen=False
+  if next_state in ('STOPPING','REACQUIRE_STOP','INPUT_PAUSE'):settled_review.reset();stop_sequences.clear()
+  if next_state in ('FAULT','INPUT_PAUSE','REACQUIRE_STOP','STOPPING','DONE'):trace.route_status('history')
+  if next_state in ('FAULT','INPUT_PAUSE') and goal and not terminal:goal.cancel_goal_async()
+  if next_state=='ALIGN_YAW':trace.route_status('position_reached')
+  state=next_state
+  event=dict(previous=old,state=state,reason=reason,recovery=budget.snapshot(time.monotonic()))
+  trace.emit('transition',**event);print('[NAV_EVENT] '+json.dumps(dict(task_id=task_id,**event),ensure_ascii=False),flush=True)
+ def begin_alignment(*a,**kw):
+  motion_guard.reset();return HeadingAlignment(*a,**kw)
+ def source_age(header):
+  return n.get_clock().now().nanoseconds/1e9-header.stamp.sec-header.stamp.nanosec*1e-9
+ def age(now,stamp):return round(now-stamp,4) if math.isfinite(stamp) else None
+ def transform_snapshot():
+  try:
+   t=tf_buffer.lookup_transform('map','nav_base',Time());p=t.transform.translation
+   return dict(stamp=t.header.stamp.sec+t.header.stamp.nanosec/1e9,source_age=source_age(t.header),position=[p.x,p.y,p.z],yaw=quaternion_yaw(t.transform.rotation))
+  except Exception as e:return dict(error=str(e))
+ def observe(now):
+  nonlocal next_sample
+  if now<next_sample:return
+  next_sample=now+.2
+  t=odom.twist.twist if odom else None
+  trace.sample(state=state,recovery=budget.snapshot(now),goal=target,
+   map_pose=current_pose() if pose else None,odom_pose=current_odom() if odom else None,
+   raw_fastlio=raw_lio,correction=loc.get('correction'),localization_mode=loc.get('mode'),tracking_fault=loc.get('tracking_fault'),
+   commands=dict(dwb=None if raw_controller is None else [raw_controller.linear.x,raw_controller.angular.z],smoothed=None if raw is None else [raw.linear.x,raw.angular.z],supervised=list(last_sent),bridge_actual=None),
+   measured=None if t is None else [t.linear.x,t.linear.y,t.angular.z],
+   sdk={k:sdk.get(k) for k in ('state_sequence','state_age_sec','reported_forward_speed','reported_lateral_speed','reported_yaw_rate','command_zero','motion')},
+   receive_age={k:age(now,v) for k,v in dict(localization=loc_at,pose=pose_at,scan=scan_at,odom=odom_at,scan_health=health_at,sdk=sdk_at,dwb=controller_at,smoothed=raw_at,raw_fastlio=raw_lio_at).items()},
+   source_age=dict(scan=None if scan_stamp is None else n.get_clock().now().nanoseconds/1e9-scan_stamp,raw_fastlio=None if raw_lio is None else n.get_clock().now().nanoseconds/1e9-raw_lio['stamp'],pose=source_age(pose.header) if pose else None,odom=source_age(odom.header) if odom else None,localization=None if loc.get('source_stamp') is None else n.get_clock().now().nanoseconds/1e9-loc['source_stamp']),
+   scan_health=scanhealth,tf=transform_snapshot(),tf_reason=tf_reason(),diagnostic_error=trace.error)
+ def on_raw_lio(m):
+  nonlocal raw_lio,raw_lio_at
+  q=m.pose.pose.orientation;p=m.pose.pose.position
+  raw_lio=dict(frame=m.header.frame_id,child_frame=m.child_frame_id,stamp=m.header.stamp.sec+m.header.stamp.nanosec/1e9,position=[p.x,p.y,p.z],quaternion=[q.x,q.y,q.z,q.w]);raw_lio_at=time.monotonic()
+ n.create_subscription(Odometry,'/Odometry',on_raw_lio,qos_profile_sensor_data)
+
  def zero():
-  vel.publish(Twist())
+  nonlocal last_sent
+  last_sent=(0.,0.);vel.publish(Twist())
  def fault(reason):
   nonlocal state,failed
   if state=='FAULT': return
-  state='FAULT'; failed=reason; zero()
+  transition('FAULT',reason); failed=reason;trace.emit('fault',reason=reason); zero()
   if goal: goal.cancel_goal_async()
  def on_sdk(m):
   nonlocal sdk,sdk_at
@@ -149,10 +201,10 @@ def main():
   nonlocal odom,odom_at
   if m.header.frame_id=='nav_odom' and m.child_frame_id=='nav_base' and -.05<stamp_age(m.header)<.4: odom=m; odom_at=time.monotonic()
  def on_scan(m):
-  nonlocal scan_at
+  nonlocal scan_at,scan_stamp
   t=m.header.stamp.sec+m.header.stamp.nanosec*1e-9
   if m.header.frame_id=='nav_base' and -.05<n.get_clock().now().nanoseconds*1e-9-t<.4 and len(m.ranges)==720:
-   scan_at=time.monotonic()
+   scan_at=time.monotonic();scan_stamp=t
  n.create_subscription(String,'/d1/sdk/d1_motion_status',on_sdk,1)
  n.create_subscription(String,'/d1/localization/status',on_loc,1)
  n.create_subscription(String,'/d1/nav/scan_status',on_health,1)
@@ -166,16 +218,23 @@ def main():
  def accepted(future):
   nonlocal goal,result,state
   try:
+   if future is not route_reply:
+    stale_goal=future.result()
+    if stale_goal.accepted:stale_goal.cancel_goal_async()
+    return
    goal=future.result()
    if not goal.accepted: fault('Nav2 rejected goal'); return
    result=goal.get_result_async()
    if state in ('FAULT','INPUT_PAUSE'): goal.cancel_goal_async()
    else:
-    state='NAVIGATE'; print('[ACCEPTED] 执行模块已接收路线，开始受监督的速度输出。',flush=True)
+    transition('NAVIGATE');trace.route_status('executing'); print('[ACCEPTED] 执行模块已接收路线，开始受监督的速度输出。',flush=True)
   except Exception as e: fault('Nav2 goal request failed: '+str(e))
  def submit_route():
-  nonlocal state,raw,raw_at,command_missing_at,first_command_seen,route_reply
-  state='ACCEPT';raw=None;raw_at=-math.inf;command_missing_at=None;first_command_seen=False
+  nonlocal state,raw,raw_at,command_missing_at,first_command_seen,route_reply,goal,result,terminal
+  # A result belongs to one action only. Never inspect a completed old action
+  # while waiting for the next route's acceptance callback.
+  goal=None;result=None;terminal=False
+  transition('ACCEPT');raw=None;raw_at=-math.inf;command_missing_at=None;first_command_seen=False
   motion_guard.reset()
   # Initial alignment can take seconds. Never submit a path with that old TF time.
   stamp=n.get_clock().now().to_msg()
@@ -184,12 +243,14 @@ def main():
    for point in pending_message.path.poses:point.header.stamp=stamp
   else:pending_message.pose.header.stamp=stamp
   print('[TRACK_PATH] 提交%s路线给DWB。' % ('终点复核后重新规划的' if reacquire_count else '已确认的预览'),flush=True)
+  if approved:trace.set_route([[p.pose.position.x,p.pose.position.y] for p in pending_message.path.poses],map_id,args.scene)
   route_reply=client.send_goal_async(pending_message);route_reply.add_done_callback(accepted)
- def pause_inputs(reason,now):
-  nonlocal state,paused_state,deadline,stable_since,paused_sequence,paused_stamp,paused_at
+ def pause_inputs(reason,now,category='data'):
+  nonlocal state,paused_state,deadline,stable_since,paused_sequence,paused_stamp,paused_at,pause_category
   zero()
   if state=='INPUT_PAUSE':return
-  paused_state=state;state='INPUT_PAUSE';stable_since=None
+  pause_category=category;budget.begin_wait(now,category)
+  paused_state=state;transition('INPUT_PAUSE',reason);stable_since=None
   paused_at=now;motion_guard.reset();settled_review.reset()
   paused_sequence=sdk.get('state_sequence');paused_stamp=loc.get('source_stamp')
   deadline=min(execution_deadline,now+30.)
@@ -231,7 +292,7 @@ def main():
     and sdk.get('command_zero') is True
     and all(isinstance(sdk.get(k),(int,float)) and math.isfinite(sdk[k]) and abs(sdk[k])<.03
             for k in ('reported_forward_speed','reported_lateral_speed','reported_yaw_rate')))
- def reacquire(reason,now):
+ def reacquire(reason,now,category=None,charged=False):
   nonlocal state,deadline,halt_at,reacquire_count,raw,raw_at,terminal
   # Called after the path action ended, or during pre-path alignment before
   # any action has started. No
@@ -242,12 +303,13 @@ def main():
    terminal=True  # No path controller is running; safe to replan after settling.
   if not terminal:
    fault('[REACQUIRE_INVALID_STATE] 路径执行尚未结束');return
-  if reacquire_count>=3:
-   fault('[REACQUIRE_LIMIT] 终点复核已重新接近3次，仍未收敛；'+reason);return
-  motion_guard.reset();settled_review.reset()
-  reacquire_count+=1;state='REACQUIRE_STOP';halt_at=now;deadline=min(execution_deadline,now+10)
+  if category is None:category='motion' if reason.startswith(('[ALIGN_ODOM_DRIFT]','[ZERO_TRANSLATION_DRIFT]','[ROUTE_SPIN]','[NO_MOTION_RESPONSE]')) else 'position'
+  if category!='data' and not charged:
+   error=budget.request(category)
+   if error:fault(error+'；'+reason);return
+  reacquire_count+=1;transition('REACQUIRE_STOP',reason);halt_at=now;deadline=min(execution_deadline,now+10)
   raw=None;raw_at=-math.inf;stop_sequences.clear()
-  print('[REACQUIRE_STOP] %s；第%d/3次，先停稳，再从当前位置重规划到原目标；总时限不重置。' % (reason,reacquire_count),flush=True)
+  print('[REACQUIRE_STOP] %s；类别=%s 计数=%s；停稳后重规划，总时限不重置。' % (reason,category,json.dumps(budget.snapshot(now),ensure_ascii=False)),flush=True)
  def turn_clear(now):
   nonlocal next_turn_check_log
   if not costmap_fresh(now):
@@ -274,16 +336,18 @@ def main():
  def costmap_fresh(now):
   return costmap is not None and now-costmap_at<.5 and -.05<stamp_age(costmap.header)<.5
  def output(vx,wz,now):
-  nonlocal next_control_log
+  nonlocal next_control_log,last_sent
   t=odom.twist.twist
   measured=(t.linear.x,t.linear.y,t.angular.z)
   reason=motion_guard.check(vx,wz,measured,now,current_odom()[:2],current_odom()[2] if state=='NAVIGATE' else None)
   if reason.startswith(('[NO_MOTION_RESPONSE]','[ZERO_TRANSLATION_DRIFT]','[ROUTE_SPIN]')) and state=='NAVIGATE':
-   pause_inputs(reason,now);return
+   error=budget.request('motion')
+   if error:fault(error+'；'+reason);return
+   pause_inputs(reason,now,'motion');return
   if reason.startswith('[ZERO_TRANSLATION_DRIFT]') and state in ('ALIGN_PATH','ALIGN_YAW'):
    reacquire(reason,now);return
   if reason:fault(reason);return
-  msg=Twist();msg.linear.x=vx;msg.angular.z=wz;vel.publish(msg)
+  msg=Twist();msg.linear.x=vx;msg.angular.z=wz;vel.publish(msg);last_sent=(vx,wz)
   if now>=next_control_log:
    pos=current_pose();distance=math.hypot(pos[0]-target['x'],pos[1]-target['y'])
    dwb=None if raw_controller is None else (round(raw_controller.linear.x,3),round(raw_controller.angular.z,3))
@@ -297,7 +361,7 @@ def main():
  print('[LIMIT] max-runtime=%.1fs; starts at goal submission, includes acceptance/navigation/stopping; countdown every 5s.' % args.max_runtime,flush=True)
  try:
   while rclpy.ok() and state not in ('FAULT','DONE'):
-   rclpy.spin_once(n,timeout_sec=.03); now=time.monotonic()
+   rclpy.spin_once(n,timeout_sec=.03); now=time.monotonic();observe(now)
    if interrupted: fault('[CANCELED] 操作者取消或服务关闭'); continue
    if args.owner_pid:
     try:os.kill(args.owner_pid,0)
@@ -310,6 +374,7 @@ def main():
    if next_countdown is not None and now>=next_countdown:
     print('[COUNTDOWN] 执行剩余 %.1fs / 上限 %.1fs；状态 %s' % (max(0.,execution_deadline-now),args.max_runtime,state),flush=True)
     next_countdown=execution_started+(math.floor((now-execution_started)/5)+1)*5
+   if state=='INPUT_PAUSE' and budget.wait_error(now):fault(budget.wait_error(now));continue
    if now>deadline:
     position=None if pose is None else [pose.pose.position.x,pose.pose.position.y]
     fault('[%s_TIMEOUT] 阶段等待超时；position=%s SDK_command_zero=%s' % (state,position,sdk.get('command_zero')))
@@ -342,11 +407,11 @@ def main():
      if route_reply is not None and not route_reply.done():continue
      if goal and not terminal and (result is None or not result.done()):continue
      print('[INPUT_RECOVERED] 新数据连续稳定0.5秒、机器人已停稳，恢复前复核完成。',flush=True)
-     deadline=execution_deadline
+     budget.end_wait(now);deadline=execution_deadline
      if paused_state in ('NAVIGATE','ACCEPT'):
-      terminal=True;goal=None;result=None;reacquire('短暂数据中断后恢复，丢弃旧路线和旧速度',now)
+      terminal=True;goal=None;result=None;reacquire('零速等待恢复，丢弃旧路线和旧速度',now,category=pause_category,charged=pause_category=='motion')
      else:
-      state=paused_state
+      transition(paused_state)
       if state in ('ALIGN_PATH','ALIGN_YAW'):
        alignment.started+=now-paused_at;alignment.progress_at+=now-paused_at
       if state in ('STOPPING','REACQUIRE_STOP'):halt_at=now;deadline=min(execution_deadline,now+10);stop_sequences.clear()
@@ -400,7 +465,7 @@ def main():
     print('[START] Walk 已稳定确认%s；最大运行时间 %.1fs，剩余 %.1fs；到时自动终止并停止速度发布。' % ('，未重复发送 standup' if walk_gate.request_before is None else '',args.max_runtime,args.max_runtime),flush=True)
     pos=current_pose();heading=initial_path_heading(approved['poses'],pos) if approved else pos[2]
     if abs(wrap(heading-pos[2]))>.35:
-     alignment=HeadingAlignment(pos,[pos[0],pos[1],heading],now,current_odom(),check_goal_position=False);state='ALIGN_PATH';align_halt_at=None
+     alignment=begin_alignment(pos,[pos[0],pos[1],heading],now,current_odom(),check_goal_position=False);transition('ALIGN_PATH');align_halt_at=None
      print('[ALIGN_PATH] 先原地对准路线起步方向 %.3frad，速度上限0.30rad/s；计入本次最大运行时间。' % heading,flush=True)
     else:submit_route()
    elif state in ('NAVIGATE','ACCEPT'):
@@ -413,8 +478,8 @@ def main():
      pos=current_pose()
      if math.hypot(pos[0]-target['x'],pos[1]-target['y'])>POSITION_RELEASE:
       reacquire('[POSITION_NOT_REACHED] DWB报告到达，但融合定位终点距离未通过复核',now);continue
-     alignment=HeadingAlignment(pos,[target['x'],target['y'],target['yaw']],now,current_odom())
-     state='ALIGN_YAW';zero()
+     alignment=begin_alignment(pos,[target['x'],target['y'],target['yaw']],now,current_odom())
+     transition('ALIGN_YAW');zero()
      print('[ALIGN_YAW] 路径跟踪已结束；位置已到达，开始独立终点朝向控制，转向上限0.30rad/s，12秒无朝向进展则停止。',flush=True)
      continue
     if state=='NAVIGATE' and raw is not None and now-raw_at<.15:
@@ -437,7 +502,7 @@ def main():
     if reason.startswith('[ALIGN_ODOM_DRIFT]'):reacquire(reason,now);continue
     if reason.startswith('[ALIGN_GOAL_SHIFT]') and state=='ALIGN_YAW':
      print('[GOAL_BOUNDARY_HOLD] '+reason+'；不立即消耗恢复次数，停稳后要求连续1秒新鲜数据复核。',flush=True)
-     state='STOPPING';deadline=min(execution_deadline,now+10);halt_at=now;stop_sequences.clear();settled_review.reset();zero();continue
+     transition('STOPPING');deadline=min(execution_deadline,now+10);halt_at=now;stop_sequences.clear();settled_review.reset();zero();continue
     if reason:fault(reason);continue
     if wz==0.:
      if state=='ALIGN_PATH':
@@ -447,7 +512,7 @@ def main():
        alignment=None;submit_route()
       continue
      print('[STOPPING] 已进入朝向容差或提前制动；保持零速，停稳后分别复核位置与朝向。',flush=True)
-     state='STOPPING';deadline=min(execution_deadline,now+10);halt_at=now;stop_sequences.clear();settled_review.reset();zero();continue
+     transition('STOPPING');deadline=min(execution_deadline,now+10);halt_at=now;stop_sequences.clear();settled_review.reset();zero();continue
     reason=turn_clear(now)
     if reason:fault('[TURN_CLEARANCE] '+reason);continue
     align_halt_at=None
@@ -464,13 +529,13 @@ def main():
     if action=='REPLAN':
      reacquire('[STOPPING_POSITION_SHIFT] 停稳且连续1秒新鲜定位确认位置超过0.20m，重新接近目标',now);continue
     if action=='ALIGN_YAW':
-     state='ALIGN_YAW';deadline=execution_deadline;motion_guard.reset()
+     transition('ALIGN_YAW');deadline=execution_deadline;motion_guard.reset()
      print('[ALIGN_YAW_RESUME] 停稳连续复核位置合格，仅微调朝向，不消耗重新接近次数。',flush=True)
      continue
     # Stable stopped samples plus two distinct SDK status messages are required.
     stop_sequences.add(sdk.get('state_sequence'))
     if len(stop_sequences)<2:continue
-    state='DONE'
+    transition('DONE')
    elif state=='REACQUIRE_STOP':
     zero()
     if sdk.get('motion')!='Walk' or sdk.get('motion_pending') is not False:fault('Walk mode lost');continue
@@ -479,8 +544,8 @@ def main():
     if len(stop_sequences)<2:continue
     pos=current_pose()
     if math.hypot(pos[0]-target['x'],pos[1]-target['y'])<=POSITION_TOLERANCE:
-     alignment=HeadingAlignment(pos,[target['x'],target['y'],target['yaw']],now,current_odom())
-     state='ALIGN_YAW';deadline=execution_deadline;continue
+     alignment=begin_alignment(pos,[target['x'],target['y'],target['yaw']],now,current_odom())
+     transition('ALIGN_YAW');deadline=execution_deadline;continue
     if not approved:
      # NavigateToPose owns planning in this optional CLI mode.
      result=None;goal=None;terminal=False;deadline=execution_deadline;submit_route();continue
@@ -494,7 +559,7 @@ def main():
     request.start.pose.orientation.z=math.sin(pos[2]/2);request.start.pose.orientation.w=math.cos(pos[2]/2)
     request.use_start=True;request.planner_id='GridBased'
     planner_goal=None;planner_result=None;planner_reply=planner.send_goal_async(request)
-    state='REPLAN';deadline=min(execution_deadline,now+10)
+    transition('REPLAN');deadline=min(execution_deadline,now+10)
     print('[REPLAN] 已停稳，使用当前融合位置、当前代价地图重新规划到原目标。',flush=True)
    elif state=='REPLAN':
     zero()
@@ -521,10 +586,11 @@ def main():
     points=[dict(x=p.pose.position.x,y=p.pose.position.y) for p in path.poses]
     heading=initial_path_heading(points,pos)
     if abs(wrap(heading-pos[2]))>.35:
-     alignment=HeadingAlignment(pos,[pos[0],pos[1],heading],now,current_odom(),check_goal_position=False)
-     state='ALIGN_PATH';align_halt_at=None
+     alignment=begin_alignment(pos,[pos[0],pos[1],heading],now,current_odom(),check_goal_position=False)
+     transition('ALIGN_PATH');align_halt_at=None
      print('[ALIGN_PATH] 重规划后对准新路线起步方向 %.3frad。' % heading,flush=True)
     else:submit_route()
+  trace.emit('finished',state=state,reason=failed,recovery=budget.snapshot(time.monotonic()));trace.route_status('history')
   print(state+': '+(failed or 'goal reached and stopped'),flush=True)
  except KeyboardInterrupt: fault('operator interrupted')
  except Exception as e:
@@ -538,7 +604,7 @@ def main():
    # (and cancel accepted goals) without publishing any further Twist.
    if not runtime_expired and (execution_deadline is None or time.monotonic()<execution_deadline):zero()
    rclpy.spin_once(n,timeout_sec=.03)
-  n.destroy_node()
+  trace.close();n.destroy_node()
   if rclpy.ok(): rclpy.shutdown()
  if interrupted: return 130
  if state!='DONE': return 1

@@ -19,5 +19,9 @@ const init=()=>run("state={navigation_ready:true};online=true;navigationOnline=t
  init();el('navigateGoal').onclick();run('goalRevision++');await el('confirmNavigation').onclick();assert.equal(posts.length,2);assert.match(el('planMessage').textContent,/已改变/);
  el('maxRuntime').value='0';el('navigateGoal').onclick();assert.equal(el('navConfirm').open,false);assert.match(el('planMessage').textContent,/大于 0/);
  run('navigationOnline=false;renderNavigation()');assert.equal(el('navigateGoal').disabled,true);
+ run("state={map_id:'m'};scene='old';online=true;navigationOnline=true;navigationStatus={active:true,task:{task_id:'a'},telemetry:{task_id:'a',fresh:true,route:{task_id:'a',route_id:'a:2',map_id:'m',scene:'old',status:'executing',points:[[0,0],[1,0]]}}};");
+ assert.equal(run('executionView().live'),true);
+ run('navigationStatus.telemetry.fresh=false');assert.equal(run('executionView().live'),false);
+ run("navigationStatus.telemetry.fresh=true;navigationStatus.telemetry.route.task_id='b'");assert.equal(run('executionView().same'),false);
  console.log('PASS: confirmation, cancel, runtime/radians, duplicate prevention, stale goal, stop task binding, disconnect.');
 })().catch(e=>{console.error(e);process.exitCode=1});
