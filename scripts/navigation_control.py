@@ -187,6 +187,60 @@ def rotation_clearance(grid, position, radius, details=None):
     return ''
 
 
+def swept_rotation_clearance(grid, pose, delta, half_length, half_width, details=None, coast_delta=0.):
+    """Cell-square vs oriented-body SAT across the requested signed turn.
+
+    The interval includes measured coast, not a full turn circle. A small
+    interpolation padding bounds corner motion between angle samples.
+    """
+    if details is None:details={}
+    info=grid.info;res=info.resolution
+    details.update(check_type='actual_rectangular_sweep',turn_rad=delta,
+                   ignored_inflated_cells=0,centre_cost=None,blocked_cell=None)
+    values=(*pose,delta,coast_delta,half_length,half_width,res)
+    if not all(math.isfinite(v) for v in values) or min(res,half_length,half_width)<=0 or info.width<=0 or info.height<=0 or len(grid.data)!=info.width*info.height:
+        return '局部地图或矩形转向参数无效'
+    origin_yaw=quaternion_yaw(info.origin.orientation)
+    dx=pose[0]-info.origin.position.x;dy=pose[1]-info.origin.position.y
+    x=math.cos(origin_yaw)*dx+math.sin(origin_yaw)*dy
+    y=-math.sin(origin_yaw)*dx+math.cos(origin_yaw)*dy
+    cx,cy=math.floor(x/res),math.floor(y/res)
+    if not (0<=cx<info.width and 0<=cy<info.height):return '机器人中心超出局部代价地图'
+    centre=int(grid.data[cy*info.width+cx]);details['centre_cost']=centre
+    if centre<0 or centre>=99:
+        details['blocked_cell']=[cx,cy,centre]
+        return '机器人中心不可通行：占用值%d（99=膨胀阻塞，100=实体障碍，-1=未知）' % centre
+    lo,hi=min(0.,delta,coast_delta),max(0.,delta,coast_delta)
+    radius=math.hypot(half_length,half_width)
+    steps=max(1,int(math.ceil((hi-lo)/min(math.radians(2),res/(4*radius)))))
+    # Every unsampled rectangle lies within this expansion of a neighbouring
+    # sampled rectangle; this prevents thin/corner intersections being missed.
+    margin=radius*(hi-lo)/steps/2
+    L,W=half_length+margin,half_width+margin
+    extent=math.hypot(L,W);half=res/2
+    cells=[]
+    for row in range(math.floor((y-extent)/res),math.floor((y+extent)/res)+1):
+        for col in range(math.floor((x-extent)/res),math.floor((x+extent)/res)+1):
+            outside=not (0<=col<info.width and 0<=row<info.height)
+            cost=-1 if outside else int(grid.data[row*info.width+col])
+            if cost<0 or cost>=99:cells.append((col,row,cost,outside,(col+.5)*res-x,(row+.5)*res-y))
+    ignored=set()
+    for i in range(steps+1):
+        a=pose[2]-origin_yaw+lo+(hi-lo)*i/steps;c,s=math.cos(a),math.sin(a)
+        ac,ass=abs(c),abs(s)
+        for col,row,cost,outside,dx,dy in cells:
+            # Four separating axes: map X/Y and the two body axes.
+            if abs(dx)>L*ac+W*ass+half or abs(dy)>L*ass+W*ac+half:continue
+            if abs(c*dx+s*dy)>L+half*(ac+ass) or abs(-s*dx+c*dy)>W+half*(ac+ass):continue
+            if cost==99:ignored.add((col,row));continue
+            details.update(blocked_cell=[col,row,cost],blocked_turn_rad=lo+(hi-lo)*i/steps,
+                           ignored_inflated_cells=len(ignored),sample_count=steps+1)
+            if outside:return '本次矩形机身转向扫过范围超出局部地图'
+            return '本次%.1f°转向的矩形机身扫过%s，格点(%d,%d)，占用值%d（100=原始代价254实体障碍，-1=未知）；不重复叠加膨胀尺寸' % (math.degrees(delta),'未知区域' if cost<0 else '实体障碍',col,row,cost)
+    details.update(ignored_inflated_cells=len(ignored),sample_count=steps+1)
+    return ''
+
+
 class MotionGuard:
     """Reference's sustained-effort guard, plus the observed reverse failure.
 

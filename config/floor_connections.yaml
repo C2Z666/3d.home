@@ -14,7 +14,9 @@ connections:
     direction: up
     trigger: mission_transition
     entry: {x: -1.582, y: 13.577, yaw: 1.7518}
-    exit: null
+    exit: {floor_id: floor2, x: -3.282, y: 18.891, yaw: 1.9173}
+    # Display-only endpoint; completion always uses exit, never preview_exit.
+    preview_exit: {floor_id: floor2, x: -3.357, y: 19.05, yaw: 1.9173}
     cost: 8.0
     control:
       mode: Stair
@@ -30,7 +32,7 @@ connections:
       max_roll_rad: 0.45
       max_pitch_rad: 0.85
     completion:
-      # No exit coordinate is fabricated. When calibrated, require BOTH tests.
+      # The calibrated floor2 exit and stable landing posture must BOTH pass.
       combine: all
       min_rise_m: 0.35
       min_forward_m: 0.8

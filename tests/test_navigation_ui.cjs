@@ -25,5 +25,12 @@ const init=()=>run("state={navigation_ready:true};online=true;navigationOnline=t
  run('navigationStatus.telemetry.fresh=false');assert.equal(run('executionView().live'),false);
  run("navigationStatus.telemetry.fresh=true;navigationStatus.telemetry.route.task_id='b'");assert.equal(run('executionView().same'),false);
  run("state={floor_state:{actual_floor:'floor1',floors:{floor1:{map_key:'lower'},floor2:{map_key:'upper'}}}};floor='upper'");assert.equal(run('actualView()'),false);assert.equal(run("floorIdForKey('upper')"),'floor2');
+ run("var stars=[];drawStar=(p,label)=>stars.push({p,label});line=()=>{};zoom=1;var conn={id:'A',from_floor:'floor1',to_floor:'floor2',entry:{x:1,y:2,yaw:0},exit:{x:3,y:4,yaw:0,floor_id:'floor2'},preview_exit:{x:5,y:6,yaw:0,floor_id:'floor2'}};state.floor_state.connections=[conn];floor='upper';previewPath=null;drawConnections()");
+ assert.equal(run('stars.length'),0,'No exit in normal map view');
+ run("floor='lower';drawConnections()");assert.equal(run('stars.length'),1,'Entrance stays visible');
+ run("stars=[];floor='upper';previewPath={mission:{connections:[conn]}};drawConnections()");
+ assert.equal(run('stars.length'),1);assert.equal(run('stars[0].p.x'),5,'Prefer preview exit');
+ run('stars=[];delete conn.preview_exit;drawConnections()');assert.equal(run('stars[0].p.x'),3,'Fall back to calibrated exit');
+ run('stars=[];conn.exit=null;drawConnections()');assert.equal(run('stars.length'),0,'No fabricated exit');
  console.log('PASS: confirmation, cancel, runtime/radians, duplicate prevention, stale goal, stop task binding, disconnect.');
 })().catch(e=>{console.error(e);process.exitCode=1});

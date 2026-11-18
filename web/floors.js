@@ -13,14 +13,20 @@ function drawStar(p,label,color='#bc7700') {
 }
 function drawConnections() {
   const fs=floorInfo(),view=floorIdForKey(floor);
+  for(const segment of previewPath?.floor_reference_paths||[]){
+    if(segment.floor!==floor)continue;
+    ctx.save();ctx.setLineDash([5/zoom,4/zoom]);line(segment.points,'#8745a3',3);ctx.restore();
+  }
   for(const c of fs.connections||[]) {
-    if(c.from_floor===view)drawStar(c.entry,c.label+' ★');
-    if(c.to_floor===view&&c.exit)drawStar(c.exit,'楼梯出口','#6d6aaf');
+    if(c.from_floor===view)drawStar(c.entry,c.label);
   }
   for(const c of previewPath?.mission?.connections||[]) {
     if(view!==c.from_floor&&view!==c.to_floor)continue;
-    if(c.exit){ctx.save();ctx.setLineDash([7/zoom,5/zoom]);line([[c.entry.x,c.entry.y],[c.exit.x,c.exit.y]],'#bc7700',2);ctx.restore()}
-    else if(view===c.to_floor)drawStar(c.entry,'入口虚拟投影 · 出口未标定','#9a9389');
+    const endpoint=c.preview_exit||c.exit;
+    if(endpoint){
+      ctx.save();ctx.setLineDash([7/zoom,5/zoom]);line([[c.entry.x,c.entry.y],[endpoint.x,endpoint.y]],'#bc7700',2);ctx.restore();
+      if(view===c.to_floor)drawStar(endpoint,c.preview_exit?'楼梯预备出口':'楼梯出口','#6d6aaf');
+    }
   }
 }
 function renderFloors() {

@@ -23,6 +23,8 @@ def main():
     (folder/'work/navigation').mkdir(parents=True)
     config=yaml.safe_load((folder/'config/floor_connections.yaml').read_text())
     c=config['connections'][0];c['entry']=dict(x=0.,y=0.,yaw=0.)
+    c['exit']=None if '--unmarked' in sys.argv else dict(floor_id='floor2',x=.7,y=0.,yaw=0.)
+    c['preview_exit']=c['exit']
     c['completion'].update(min_rise_m=.2,min_forward_m=.2,stable_sec=.3,level_travel_m=.1)
     (folder/'config/floor_connections.yaml').write_text(yaml.safe_dump(config))
     (folder/'scripts/scene_registry.py').write_text("def scene_bundle(root,name):return {'map_id':'d1_hall_100832_hall_clean','maps':{'lower':{},'upper':{}}}\n")

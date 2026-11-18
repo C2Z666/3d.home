@@ -28,12 +28,12 @@ def load_registry(root, scene):
         ids.add(c['id'])
         if c.get('direction') != 'up' or c.get('type') != 'stairs' or c.get('trigger') != 'mission_transition':
             raise ValueError('当前只支持显式任务触发的单向上楼连接')
-        for name in ('entry', 'exit'):
+        for name in ('entry', 'exit', 'preview_exit'):
             p = c.get(name)
-            if p is None and name == 'exit': continue
+            if p is None and name in ('exit', 'preview_exit'): continue
             if not isinstance(p, dict) or not all(finite(p.get(k)) for k in ('x', 'y', 'yaw')):
                 raise ValueError('连接位姿无效: '+c['id']+'/'+name)
-            if name=='exit' and p.get('floor_id')!=c['to_floor']:
+            if name in ('exit', 'preview_exit') and p.get('floor_id')!=c['to_floor']:
                 raise ValueError('结束坐标必须明确绑定连接的目标楼层')
             if 'z' in p and not finite(p['z']):raise ValueError('楼层位姿 Z 必须为有限数值')
         ctl=c['control'];end=c['completion']

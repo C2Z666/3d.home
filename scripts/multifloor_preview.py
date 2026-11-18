@@ -39,6 +39,19 @@ class MultiFloorPreview(PreviewPlanner):
             result.update(goal=goal,target_floor=target,source_floor=source,
                 mission=dict(source_floor=source,target_floor=target,connections=connections,
                     transition_only=transition_only,registry_revision=registry['revision'],first_segment=original),
-                note='已规划至首个预备点；楼梯为专用直行段，后续平地段到层后按实测位置规划。未标定出口不参与结束坐标判断。')
+                note='已规划至首个预备点；虚线仅表示楼梯连接，后续平地段到层后按实测位置规划。'+
+                     ('出口已绑定目标楼层，参与平台结束判定。' if all(c.get('exit') for c in connections) else '未标定出口不参与结束坐标判断。'))
+            result['floor_reference_paths']=[]
+            if not transition_only:
+                endpoint=connections[-1].get('preview_exit') or connections[-1].get('exit')
+                key=registry['floors'][target]['map_key']
+                if endpoint:
+                    try:
+                        from static_floor_preview import static_path
+                        points=static_path(*self.maps[self.scene][key],endpoint,goal)
+                        result['floor_reference_paths'].append(dict(floor=key,points=points,reference_only=True))
+                        result['note']+=' 已显示出口到目标的静态参考路线（出口附近允许35cm接入范围）；到层后重新规划执行。'
+                    except ValueError as e:result['note']+=' 目标层参考路线未生成：'+str(e)+'。'
+                else:result['note']+=' 出口未标定，暂不能预览目标层路线。'
             return result
         raise PreviewError('所有楼梯入口均无法规划：'+'；'.join(errors))

@@ -26,13 +26,14 @@ class OrinFormatTests(unittest.TestCase):
     def test_map_identity_and_scan_fix_are_retained(self):
         self.assertEqual(verify(ROOT),json.loads((ROOT/'config/scenes.json').read_text())['scenes']['old']['map_id'])
         tree=ast.parse((ROOT/'scripts/cloud_scan.py').read_text(encoding='utf-8'))
-        call=next(n.value for n in ast.walk(tree) if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='ranges' for t in n.targets))
+        call=next(n.value for n in ast.walk(tree) if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='ranges' for target in n.targets for t in ast.walk(target)))
         code=compile(ast.Expression(call),'online_scan_call','eval')
         cfg=dict(range_min_m=.3,range_max_m=8.,base_height_m=.47,obstacle_min_above_floor_m=.12,obstacle_max_above_floor_m=1.2)
         # Identity extrinsics preserve the raw axes. atan2(+Y, +X) sets scan bins.
         for point,expected in [([2.,0,0],360),([0,2.,0],540),([-2.,0,0],0),([0,-2.,0],180)]:
             with self.subTest(point=point):
                 out=eval(code,dict(project=project,xyz=np.array([point]),N_B=np.eye(4),B_L=np.eye(4),c=cfg,projection_info={}))
+                if isinstance(out,tuple):out=out[0]
                 self.assertEqual(np.flatnonzero(np.isfinite(out)).tolist(),[expected])
                 self.assertEqual(out[expected],2.)
     def test_web_text_and_ids(self):

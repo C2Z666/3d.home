@@ -114,18 +114,40 @@ global_costmap:
         map_subscribe_transient_local: true
         map_topic: /map
       obstacle_layer:
-        plugin: nav2_costmap_2d::ObstacleLayer
+        plugin: d1_temporal_costmap::TemporalVoxelLayer
         enabled: true
-        observation_sources: scan
-        scan:
-          topic: /d1/nav/scan
-          data_type: LaserScan
-          clearing: true
+        origin_z: -0.5
+        z_resolution: 0.1
+        z_voxels: 16
+        unknown_threshold: 15
+        mark_threshold: 0
+        publish_voxel_map: false
+        max_obstacle_height: 1.1
+        observation_sources: obstacles free_rays
+        obstacles:
+          topic: /d1/nav/obstacle_points
+          # Points already use nav_base; marking needs no extra origin TF.
+          sensor_frame: nav_base
+          data_type: PointCloud2
+          clearing: false
           marking: true
           obstacle_max_range: 3.0
+          obstacle_min_range: 0.0
+          min_obstacle_height: -0.5
+          max_obstacle_height: 1.1
+          observation_persistence: 10.0
+          expected_update_rate: 0.5
+        free_rays:
+          topic: /d1/nav/clearing_points
+          sensor_frame: d1_nav_lidar_origin
+          data_type: PointCloud2
+          clearing: true
+          marking: false
           raytrace_max_range: 4.0
-          min_obstacle_height: 0.0
-          max_obstacle_height: 2.0
+          raytrace_min_range: 0.0
+          min_obstacle_height: -10.0
+          max_obstacle_height: 10.0
+          observation_persistence: 0.0
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
         inflation_radius: 0.40
@@ -152,18 +174,40 @@ local_costmap:
       width: 4
       height: 4
       obstacle_layer:
-        plugin: nav2_costmap_2d::ObstacleLayer
+        plugin: d1_temporal_costmap::TemporalVoxelLayer
         enabled: true
-        observation_sources: scan
-        scan:
-          topic: /d1/nav/scan
-          data_type: LaserScan
-          clearing: true
+        origin_z: -0.5
+        z_resolution: 0.1
+        z_voxels: 16
+        unknown_threshold: 15
+        mark_threshold: 0
+        publish_voxel_map: false
+        max_obstacle_height: 1.1
+        observation_sources: obstacles free_rays
+        obstacles:
+          topic: /d1/nav/obstacle_points
+          # Points already use nav_base; marking needs no extra origin TF.
+          sensor_frame: nav_base
+          data_type: PointCloud2
+          clearing: false
           marking: true
           obstacle_max_range: 3.0
+          obstacle_min_range: 0.0
+          min_obstacle_height: -0.5
+          max_obstacle_height: 1.1
+          observation_persistence: 10.0
+          expected_update_rate: 0.5
+        free_rays:
+          topic: /d1/nav/clearing_points
+          sensor_frame: d1_nav_lidar_origin
+          data_type: PointCloud2
+          clearing: true
+          marking: false
           raytrace_max_range: 4.0
-          min_obstacle_height: 0.0
-          max_obstacle_height: 2.0
+          raytrace_min_range: 0.0
+          min_obstacle_height: -10.0
+          max_obstacle_height: 10.0
+          observation_persistence: 0.0
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
         inflation_radius: 0.40

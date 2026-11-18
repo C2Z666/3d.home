@@ -26,6 +26,7 @@ class FloorTests(unittest.TestCase):
         self.scene=dict(map_id='d1_hall_100832_hall_clean',maps={'lower':{},'upper':{}})
         self.registry=load_registry(ROOT,self.scene)
         self.c=copy.deepcopy(self.registry['connections'][0])
+        self.c['exit']=None  # Generic detector fixtures exercise an uncalibrated stair.
     def test_registry_and_parallel_connections(self):
         self.assertEqual(floor_id(self.registry,'upper'),'floor2')
         other=copy.deepcopy(self.c);other['id']='B';other['entry']['x']=100
@@ -47,7 +48,7 @@ class FloorTests(unittest.TestCase):
             self.assertEqual(cross['mission']['target_floor'],'floor2')
             self.assertEqual(cross['goal']['x'],1)
             self.assertEqual(plan.call_args.args[0]['floor'],'lower')
-            self.assertIsNone(cross['mission']['connections'][0]['exit'])
+            self.assertEqual(cross['mission']['connections'][0]['exit']['floor_id'],'floor2')
     def test_state_does_not_leak_between_maps(self):
         with tempfile.TemporaryDirectory() as d:
             write_state(d,self.registry,actual_floor=None,phase='STAIR')
@@ -69,6 +70,10 @@ class FloorTests(unittest.TestCase):
         d=LandingDetector(self.c)
         self.assertTrue(self.climb_and_level(d))
         self.assertFalse(d.evidence['coordinate_enabled']);self.assertIsNone(d.evidence['coordinate_pass'])
+    def test_preview_exit_is_not_a_completion_coordinate(self):
+        self.c['preview_exit']=dict(floor_id='floor2',x=100,y=100,yaw=0)
+        d=LandingDetector(self.c)
+        self.assertTrue(self.climb_and_level(d));self.assertFalse(d.evidence['coordinate_enabled'])
     def test_same_xy_on_floor1_cannot_complete_calibrated_exit(self):
         self.c['exit']=dict(x=2,y=0,yaw=0,floor_id='floor2')
         for combine in ('all','any'):

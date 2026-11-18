@@ -136,67 +136,32 @@ class PreviewPlanner:
         return future.result()
 
     def plan(self, data):
-        from geometry_msgs.msg import PoseStamped
-        from action_msgs.msg import GoalStatus
+        from body_planner import plan_body
+        import json
+        import yaml
         if not self.lock.acquire(blocking=False):
             raise PreviewError('正在计算另一条路线，请稍后重试')
-        handle = None
         try:
             goal, start, identity = validate_request(data, self.scene, self.maps, self.snapshot())
-            if not self.client.server_is_ready():
-                raise PreviewError('Nav2 预览规划服务未就绪')
-            def pose(value):
-                p = PoseStamped()
-                p.header.frame_id = 'map'
-                p.header.stamp = self.node.get_clock().now().to_msg()
-                p.pose.position.x, p.pose.position.y = value['x'], value['y']
-                p.pose.orientation.z = math.sin(value['yaw']/2)
-                p.pose.orientation.w = math.cos(value['yaw']/2)
-                return p
-            request = self.action_type.Goal()
-            request.start, request.goal = pose(start), pose(goal)
-            request.use_start = True
-            request.planner_id = 'GridBased'
             begin = time.monotonic()
-            pending = self.client.send_goal_async(request)
+            cfg = yaml.safe_load((self.state.root/'config/nav2.yaml').read_text())
+            body = cfg['local_costmap']['local_costmap']['ros__parameters']
+            footprint = json.loads(body['footprint'])
+            length = max(abs(p[0]) for p in footprint)+body['footprint_padding']
+            width = max(abs(p[1]) for p in footprint)+body['footprint_padding']
             try:
-                handle = self.wait(pending, 4)
-            except PreviewError:
-                def cancel_late(future):
-                    try:
-                        h = future.result()
-                        if h and h.accepted: h.cancel_goal_async()
-                    except Exception: pass
-                pending.add_done_callback(cancel_late)
-                raise
-            if not handle.accepted:
-                raise PreviewError('Nav2 拒绝了规划请求')
-            result = self.wait(handle.get_result_async(), 12)
-            if result.status != GoalStatus.STATUS_SUCCEEDED or not result.result.path.poses:
-                try:
-                    code, reason, details = diagnose(self.costmap(fresh=True), start, goal)
-                except PreviewError as e:
-                    raise PreviewError('规划失败；'+str(e)+'，暂时无法判断栅格原因', 'diagnosis_unavailable') from e
-                details['action_status'] = result.status
-                details['planner_error_code'] = getattr(result.result, 'error_code', None)
-                raise PreviewError(reason, code, details)
+                path, certificate = plan_body(self.costmap(fresh=True),
+                    [start[k] for k in ('x','y','yaw')], [goal[k] for k in ('x','y','yaw')], length, width)
+            except ValueError as e:
+                raise PreviewError(str(e), 'body_planning_failed') from e
             _, _, current_identity = validate_request(data, self.scene, self.maps, self.snapshot())
             if current_identity != identity:
                 raise PreviewError('规划期间定位发生重置，请重新规划')
-            path = result.result.path
-            if path.header.frame_id != 'map':
-                raise PreviewError('规划路径坐标系不匹配')
-            points = [[p.pose.position.x, p.pose.position.y] for p in path.poses]
-            if not all(math.isfinite(x) and math.isfinite(y) for x, y in points):
-                raise PreviewError('规划返回了无效坐标')
+            points = [[p['x'],p['y']] for p in path]
             return dict(ok=True, preview_only=True, scene=self.scene, floor=data['floor'],
                         map_id=identity[2], localization_session=identity[0], localization_epoch=identity[1],
-                        start=start, goal=goal, points=points,
-                        _path=[dict(x=p.pose.position.x,y=p.pose.position.y,yaw=math.atan2(2*p.pose.orientation.w*p.pose.orientation.z,1-2*p.pose.orientation.z**2)) for p in path.poses],
+                        start=start, goal=goal, points=points, _path=path, body_certificate=certificate,
                         length_m=sum(math.hypot(b[0]-a[0], b[1]-a[1]) for a,b in zip(points, points[1:])),
                         compute_sec=time.monotonic()-begin)
-        except Exception:
-            if handle is not None and handle.accepted: handle.cancel_goal_async()
-            raise
         finally:
             self.lock.release()

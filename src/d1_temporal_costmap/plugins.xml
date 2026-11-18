@@ -1,0 +1,5 @@
+<library path="d1_temporal_costmap">
+  <class name="d1_temporal_costmap::TemporalVoxelLayer" type="d1_temporal_costmap::TemporalVoxelLayer" base_class_type="nav2_costmap_2d::Layer">
+    <description>Rebuild only the live layer from bounded, fresh observations; retain static map and fail closed on sensor loss.</description>
+  </class>
+</library>
