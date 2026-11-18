@@ -1,9 +1,10 @@
 const fs=require('fs'),vm=require('vm'),assert=require('node:assert/strict');
 const elements=new Map(),posts=[];
 const ctx=new Proxy({}, {get:()=>()=>{}});
-function el(id){if(!elements.has(id))elements.set(id,{value:'',checked:true,textContent:'',style:{},classList:{toggle(){},remove(){}},getContext:()=>ctx,getBoundingClientRect:()=>({width:800,height:570,left:0,top:0}),addEventListener(){},removeAttribute(){},showModal(){this.open=true},close(){this.open=false},focus(){}});return elements.get(id)}
-const sandbox={document:{getElementById:el},location:{search:'?scene=old'},URLSearchParams,performance,AbortController,setTimeout:()=>1,clearTimeout(){},window:{devicePixelRatio:1},Image:function(){},console};
+function el(id){if(!elements.has(id))elements.set(id,{value:'',checked:true,options:[],setAttribute(){},replaceChildren(...items){this.options=items;this.value=this.value||items[0]?.value||''},textContent:'',style:{},classList:{toggle(){},remove(){}},getContext:()=>ctx,getBoundingClientRect:()=>({width:800,height:570,left:0,top:0}),addEventListener(){},removeAttribute(){},showModal(){this.open=true},close(){this.open=false},focus(){}});return elements.get(id)}
+const sandbox={document:{getElementById:el,createElement:()=>({value:'',textContent:''}),hidden:false},location:{search:'?scene=old'},URLSearchParams,performance,AbortController,setTimeout:()=>1,clearTimeout(){},window:{devicePixelRatio:1},Image:function(){},console};
 vm.createContext(sandbox);
+vm.runInContext(fs.readFileSync(require('path').join(__dirname,'../web/floors.js'),'utf8'),sandbox);
 const html=fs.readFileSync(require('path').join(__dirname,'../web/index.html'),'utf8');
 vm.runInContext(html.split('<script>')[1].split('</script>')[0].replace('poll();pollCostmap();','').replace(/\npollNavigation\(\);/,''),sandbox);
 const run=code=>vm.runInContext(code,sandbox);
@@ -23,5 +24,6 @@ const init=()=>run("state={navigation_ready:true};online=true;navigationOnline=t
  assert.equal(run('executionView().live'),true);
  run('navigationStatus.telemetry.fresh=false');assert.equal(run('executionView().live'),false);
  run("navigationStatus.telemetry.fresh=true;navigationStatus.telemetry.route.task_id='b'");assert.equal(run('executionView().same'),false);
+ run("state={floor_state:{actual_floor:'floor1',floors:{floor1:{map_key:'lower'},floor2:{map_key:'upper'}}}};floor='upper'");assert.equal(run('actualView()'),false);assert.equal(run("floorIdForKey('upper')"),'floor2');
  console.log('PASS: confirmation, cancel, runtime/radians, duplicate prevention, stale goal, stop task binding, disconnect.');
 })().catch(e=>{console.error(e);process.exitCode=1});

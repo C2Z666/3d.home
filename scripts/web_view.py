@@ -8,6 +8,7 @@ import cv2, numpy as np, yaml
 from scene_registry import load_scenes, scene_bundle, scene_list
 from site_identity import verify
 import map_versions
+from floor_routes import load_registry, public_state
 
 def yaw(q):
     return math.atan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z))
@@ -33,6 +34,8 @@ class ViewerState:
                 out.get('pose_age',99)<.6 and -.1<=out.get('pose_source_age',99)<.6 and loc.get('map_id')==self.map_id)
             out['navigation_ready']=bool(out['pose_current'] and loc.get('ready') is True)
             out['trajectory']=list(self.trail)
+            if self.scene_name:
+                out['floor_state']=public_state(self.root,load_registry(self.root,scene_bundle(self.root,self.scene_name)))
             return out
 
 def map_assets(root,scene):
@@ -67,7 +70,7 @@ def handler(state,maps,camera,references,ros_now,scene_info,default_scene,previe
             self.wfile.write(body)
         def do_POST(self):
             endpoint=urlparse(self.path).path
-            if endpoint not in ('/preview-plan','/navigation/start','/navigation/stop','/map-switch'):
+            if endpoint not in ('/preview-plan','/navigation/start','/navigation/stop','/map-switch','/localization/manual'):
                 return self.send(404,b'Not found','text/plain')
             try:
                 if self.headers.get('Origin') not in (None, 'http://'+self.headers.get('Host',''), 'https://'+self.headers.get('Host','')):
@@ -80,6 +83,9 @@ def handler(state,maps,camera,references,ros_now,scene_info,default_scene,previe
                 if endpoint=='/map-switch':
                     if data.get('confirmed') is not True:raise ValueError('需要确认切换地图')
                     result=map_versions.request(state.root,data.get('version'),navigation,preview)
+                elif endpoint=='/localization/manual':
+                    if navigation is None:raise ValueError('定位服务未启用')
+                    result=navigation.manual_initialize(data)
                 elif endpoint=='/navigation/start':
                     if navigation is None:raise ValueError('导航执行未启用')
                     result=navigation.start(data)
@@ -113,6 +119,7 @@ def handler(state,maps,camera,references,ros_now,scene_info,default_scene,previe
                     result=navigation.snapshot(include_logs=q.get('logs',['1'])[0]!='0') if navigation else dict(ok=False,error='导航执行未启用')
                     return self.send(200,json.dumps(result,ensure_ascii=False,allow_nan=False).encode(),'application/json; charset=utf-8')
                 if url.path=='/':return self.send(200,html,'text/html; charset=utf-8')
+                if url.path=='/floors.js':return self.send(200,(state.root/'web/floors.js').read_bytes(),'text/javascript; charset=utf-8')
                 if url.path=='/preview-costmap':
                     try:
                         if map_versions.busy(state.root):raise ValueError('地图正在切换')
@@ -127,6 +134,8 @@ def handler(state,maps,camera,references,ros_now,scene_info,default_scene,previe
                     if spec['map_id']!=state.map_id or map_versions.busy(state.root):
                         data.update(pose_current=False,navigation_ready=False,pose=None,trajectory=[],scan=None)
                     data['map_id']=spec['map_id']
+                    if spec['map_id']!=state.map_id:
+                        data['floor_state']=public_state(state.root,load_registry(state.root,scene_bundle(state.root,scene_name)))
                     data['selected_scene']=scene_name
                     data['active_scene']=next((n for n,v in scene_info.items() if v['map_id']==data.get('localization',{}).get('map_id')),None)
                     data['scenes']=scene_list(state.root)
@@ -174,6 +183,7 @@ def main():
     bundles={name:scene_bundle(root,name) for name in registry['scenes']}
     maps={name:map_assets(root,bundle) for name,bundle in bundles.items()}
     state=ViewerState(root,bundles[default_scene]['map_id']);camera={}
+    state.select(default_scene,bundles[default_scene]['map_id'])
     refs={}
     for name,bundle in bundles.items():
         refs[name]=[]
@@ -250,8 +260,8 @@ def main():
                 for key in ('image','at','stamp'):camera.pop(key,None)
     n.create_timer(.5,update_camera_subscription)
     scene_info={name:{k:v for k,v in bundle.items() if k not in ('root','visual_map','maps')} for name,bundle in bundles.items()}
-    from preview_planner import PreviewPlanner
-    preview=PreviewPlanner(n,state,maps,default_scene)
+    from multifloor_preview import MultiFloorPreview
+    preview=MultiFloorPreview(n,state,maps,default_scene)
     from web_navigation import NavigationManager
     navigation=NavigationManager(root,preview)
     server=ThreadingHTTPServer((args.host,args.port),handler(state,maps,camera,refs,clock,scene_info,default_scene,preview,navigation));server.daemon_threads=True

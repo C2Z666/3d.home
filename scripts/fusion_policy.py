@@ -29,6 +29,16 @@ class FusionPolicy:
         self.target_ttl = 1.5  # capture time, never result arrival time
         self.correction = dict(active=False,step_m=0.,step_deg=0.,remaining_m=0.,remaining_deg=0.)
 
+        self.alignment_source = 'visual'
+
+    def initialize_manual(self, transform, stamp):
+        self.T=rigid(transform);self.epoch+=1
+        self.target=None;self.target_stamp=None;self.advance_stamp=None
+        self.required=self.recovering=False;self.candidates.clear()
+        self.last_visual=None;self.visual_stale=True;self.last_query=stamp
+        self.alignment_source='manual'
+        self.reason='手动地图初值已应用，FAST-LIO连续跟踪，等待视觉纠偏'
+
     def invalidate(self, reason):
         # A failed manual recovery must not permanently disable an existing
         # map alignment. Actual odometry faults are gated by localization_live.
@@ -91,6 +101,7 @@ class FusionPolicy:
             self.target = C
             self.target_stamp = t
         self.last_visual = t
+        self.alignment_source = 'visual'
         self.visual_stale = False
         self.reason = 'accepted visual alignment; correction applied smoothly at odometry rate'
         return True

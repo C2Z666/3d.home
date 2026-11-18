@@ -22,6 +22,7 @@ def main():
     p.add_argument('--max-visual-age',type=float,default=5.)
     p.add_argument('--matching-profile',choices=('strict','relaxed'),default='relaxed')
     args,ros_args=p.parse_known_args(); cv2.setNumThreads(2)
+    alignment_checkpoint=os.environ.get('D1_ALIGNMENT_CHECKPOINT')
     scene=scene_bundle(root,args.scene)
     if args.scene=='old': verify(root)
     map_id=scene['map_id']
@@ -51,6 +52,10 @@ def main():
     from tf2_ros import TransformBroadcaster
     from cv_bridge import CvBridge
     from std_srvs.srv import Trigger
+    from rcl_interfaces.srv import SetParametersAtomically
+    from rcl_interfaces.msg import SetParametersResult
+    from floor_routes import load_registry, floor_id, read_state, write_state
+    registry=load_registry(root,scene)
     rclpy.init(args=ros_args); node=Node('d1_visual_fastlio'); cv=CvBridge(); tf=TransformBroadcaster(node)
     odpub=node.create_publisher(Odometry,'/d1/localization/odom',10)
     posepub=node.create_publisher(PoseStamped,'/d1/localization/pose6d',10)
@@ -94,7 +99,7 @@ def main():
         nonlocal graph_error,graph_at,fault
         graph_at=time.monotonic(); graph_error=''
         names=set(node.get_node_names())
-        if names.intersection({'d1_nav_supervisor'}): graph_error='end navigation task before relocalization'
+        if names.intersection({'d1_nav_supervisor','d1_multifloor_mission'}): graph_error='end navigation task before relocalization'
         for topic in ('/d1/sdk/supervised_cmd_vel',):
             if node.get_publishers_info_by_topic(topic): graph_error='active command publisher: '+topic
         if node.get_publishers_info_by_topic('/d1/sdk/d1_motion_status') and sdk_at==-math.inf:
@@ -112,6 +117,29 @@ def main():
         p.position.x,p.position.y,p.position.z=map(float,T[:3,3])
         q=Rotation.from_matrix(T[:3,:3]).as_quat()
         p.orientation.x,p.orientation.y,p.orientation.z,p.orientation.w=map(float,q)
+    def manual_initialize(req,res):
+        try:
+            if len(req.parameters)!=1 or req.parameters[0].name!='initial_pose' or req.parameters[0].value.type!=4:
+                raise ValueError('initial_pose JSON 参数缺失')
+            request=json.loads(req.parameters[0].value.string_value)
+            if request.get('confirmed') is not True:raise ValueError('需要确认手动初值')
+            audit_graph();reason=recovery_blocker()
+            if reason:raise ValueError(reason)
+            if request.get('session')!=session or request.get('epoch')!=fusion.epoch:
+                raise ValueError('定位状态已变化，请刷新后重新标定')
+            fid=floor_id(registry,request.get('floor_id'))
+            from manual_initialization import alignment
+            transform=alignment(request,latest[1],map_id)
+            fusion.initialize_manual(transform,ros_seconds())
+            pending.clear()
+            write_state(root,registry,actual_floor=fid,active_nav_floor=None,target_floor=None,
+                        phase='ON_FLOOR',connection_id=None,source='manual_initial_pose',
+                        base_z_by_floor={**read_state(root,registry).get('base_z_by_floor',{}),fid:request['z']})
+            audit.info(json.dumps(dict(event='MANUAL_INITIAL_POSE',request=request,epoch=fusion.epoch)))
+            res.result=SetParametersResult(successful=True,reason=json.dumps(dict(epoch=fusion.epoch,floor_id=fid)))
+        except (ValueError,KeyError,TypeError) as e:
+            res.result=SetParametersResult(successful=False,reason=str(e))
+        return res
     def trans(parent,child,T,stamp):
         msg=TransformStamped(); msg.header.frame_id=parent; msg.header.stamp=stamp; msg.child_frame_id=child
         msg.transform.translation.x,msg.transform.translation.y,msg.transform.translation.z=map(float,T[:3,3])
@@ -119,7 +147,7 @@ def main():
         msg.transform.rotation.x,msg.transform.rotation.y,msg.transform.rotation.z,msg.transform.rotation.w=map(float,q)
         return msg
     def onodom(m):
-        nonlocal latest,received,fault
+        nonlocal latest,received,fault,alignment_checkpoint
         if fault: return
         t=seconds(m.header)
         if m.header.frame_id!=args.odom_frame or m.child_frame_id!=args.body_frame:
@@ -133,6 +161,19 @@ def main():
         if history and Rotation.from_matrix((np.linalg.inv(history[-1][1])@O)[:3,:3]).magnitude()>.8:
             fault='odometry rotation discontinuity'; return
         previous=latest; latest=(t,O,m.header.stamp); received=time.monotonic(); history.append((t,O))
+        if alignment_checkpoint:
+            checkpoint_path=alignment_checkpoint;alignment_checkpoint=None
+            try:
+                saved=json.loads(Path(checkpoint_path).read_text())
+                before=np.array(saved['raw_base']);delta=np.linalg.inv(before)@O
+                if (saved['map_id']!=map_id or not 0<=ros_seconds()-saved['stamp']<30 or
+                    t<saved['stamp'] or np.linalg.norm(delta[:3,3])>.1 or
+                    Rotation.from_matrix(delta[:3,:3]).magnitude()>.1):raise ValueError('checkpoint stale or odometry changed')
+                fusion.initialize_manual(np.array(saved['alignment']),ros_seconds())
+                fusion.alignment_source='restart_checkpoint'
+                print('[ALIGNMENT_RESTORED] 已核对同一连续里程计，保留重启前地图对齐',flush=True)
+            except (OSError,ValueError,KeyError) as e:
+                print('[ALIGNMENT_NOT_RESTORED] '+str(e),flush=True)
         if fusion.T is None: return
         fusion.advance(O,t)
         M=fusion.T@O; P=planar(navigation_pose(O)); Q=planar(M)
@@ -207,7 +248,7 @@ def main():
         state='LOST' if not tracking else 'RELOCALIZING' if fusion.recovering else 'WAITING' if fusion.T is None else 'FUSED' if visual_fresh else 'ODOM_ONLY'
         reason=fault or ('FAST-LIO连续定位，等待有效视觉纠偏；导航可用' if state=='ODOM_ONLY' and ready else '视觉融合定位正常' if ready else fusion.reason)
         data=dict(session=session,sequence=sequence,epoch=fusion.epoch,map_id=map_id,tracking_valid=bool(tracking),tracking_fault=fault,ready=ready,
-                  mode=state,recovery_required=fusion.required,relocalizing=fusion.recovering,visual=visual_info,
+                  mode=state,alignment_source=fusion.alignment_source,recovery_required=fusion.required,relocalizing=fusion.recovering,visual=visual_info,
                   visual_fresh=visual_fresh,last_rejection_reason=fusion.last_rejection_reason,
                   correction=dict(fusion.correction,translation_rate_mps=fusion.translation_rate,rotation_rate_degps=math.degrees(fusion.rotation_rate),target_ttl_sec=fusion.target_ttl),
                   image_info=image_info,image_recent=time.monotonic()-image_at<1.,visual_age=visual_age,source_stamp=latest[0] if latest else None,reason=reason)
@@ -225,6 +266,7 @@ def main():
     node.create_subscription(Image,'/front_camera/image',onimage,qos_profile_sensor_data)
     node.create_subscription(String,'/d1/sdk/d1_motion_status',on_sdk,1)
     node.create_service(Trigger,'/d1/localization/relocalize',request_recovery)
+    node.create_service(SetParametersAtomically,'/d1/localization/manual_initialize',manual_initialize)
     node.create_timer(.1,tick); thread=threading.Thread(target=worker,daemon=True); thread.start()
     try: rclpy.spin(node)
     except KeyboardInterrupt: pass

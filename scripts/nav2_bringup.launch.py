@@ -14,8 +14,13 @@ def setup(context):
     if not site.get('maps_validated') or not site.get('scan_source_validated'):
         raise RuntimeError('config/site.yaml: validate maps and current-floor scan projection before Nav2 startup')
     floor=LaunchConfiguration('floor').perform(context)
-    if floor not in ('lower','upper'): raise ValueError('floor must be lower or upper')
     scene=scene_bundle(root,LaunchConfiguration('scene').perform(context))
+    from floor_routes import load_registry,read_state,floor_id
+    registry=load_registry(root,scene)
+    if floor=='auto':
+        state=read_state(root,registry)
+        floor=state.get('active_nav_floor') or state.get('actual_floor') or registry['initial_floor']
+    floor=registry['floors'][floor_id(registry,floor)]['map_key']
     cfg=str(root/'config/nav2.yaml'); use_sim=ParameterValue(LaunchConfiguration('use_sim_time'),value_type=bool)
     common=[cfg,{'use_sim_time':use_sim}]
     nodes=[Node(package='nav2_map_server',executable='map_server',name='map_server',parameters=[cfg,{'use_sim_time':use_sim,'yaml_filename':str(scene['maps'][floor]['yaml'])}]),
@@ -27,4 +32,4 @@ def setup(context):
     return nodes
 
 def generate_launch_description():
-    return LaunchDescription([DeclareLaunchArgument('scene',default_value='old'),DeclareLaunchArgument('floor',default_value='lower'),DeclareLaunchArgument('use_sim_time',default_value='false'),OpaqueFunction(function=setup)])
+    return LaunchDescription([DeclareLaunchArgument('scene',default_value='old'),DeclareLaunchArgument('floor',default_value='auto'),DeclareLaunchArgument('use_sim_time',default_value='false'),OpaqueFunction(function=setup)])

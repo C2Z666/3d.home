@@ -1,0 +1,42 @@
+schema_version: 1
+map_id: d1_hall_100832_hall_clean
+initial_floor: floor1
+floors:
+  floor1: {label: 楼道大厅 floor1, map_key: lower, base_z: 0.0}
+  floor2: {label: 楼梯平台 floor2, map_key: upper, base_z: null}
+connections:
+  - id: stairs_A_floor1_to_floor2
+    label: A楼梯上楼预备点
+    type: stairs
+    enabled: true
+    from_floor: floor1
+    to_floor: floor2
+    direction: up
+    trigger: mission_transition
+    entry: {x: -1.582, y: 13.577, yaw: 1.7518}
+    exit: null
+    cost: 8.0
+    control:
+      mode: Stair
+      strategy: straight
+      heading_correction: false
+      cruise_speed: 0.4
+      landing_speed: 0.15
+      max_runtime: 120.0
+      max_travel_m: 12.0
+      max_rise_m: 5.0
+      max_heading_error_rad: 0.35
+      max_lateral_m: 0.4
+      max_roll_rad: 0.45
+      max_pitch_rad: 0.85
+    completion:
+      # No exit coordinate is fabricated. When calibrated, require BOTH tests.
+      combine: all
+      min_rise_m: 0.35
+      min_forward_m: 0.8
+      level_roll_rad: 0.105
+      level_pitch_rad: 0.105
+      stable_sec: 1.5
+      height_span_m: 0.05
+      level_travel_m: 0.6
+      position_tolerance_m: 0.35

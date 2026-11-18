@@ -32,7 +32,7 @@ class OrinFormatTests(unittest.TestCase):
         # Identity extrinsics preserve the raw axes. atan2(+Y, +X) sets scan bins.
         for point,expected in [([2.,0,0],360),([0,2.,0],540),([-2.,0,0],0),([0,-2.,0],180)]:
             with self.subTest(point=point):
-                out=eval(code,dict(project=project,xyz=np.array([point]),N_B=np.eye(4),B_L=np.eye(4),c=cfg))
+                out=eval(code,dict(project=project,xyz=np.array([point]),N_B=np.eye(4),B_L=np.eye(4),c=cfg,projection_info={}))
                 self.assertEqual(np.flatnonzero(np.isfinite(out)).tolist(),[expected])
                 self.assertEqual(out[expected],2.)
     def test_web_text_and_ids(self):

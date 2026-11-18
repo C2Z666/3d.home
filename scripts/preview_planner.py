@@ -50,8 +50,11 @@ def diagnose(grid, start, goal):
 def validate_request(data, scene, maps, snapshot):
     if not isinstance(data, dict):
         raise PreviewError('请求必须为 JSON 对象')
-    if data.get('scene') != scene or data.get('floor') != 'lower':
-        raise PreviewError('预览服务只加载当前启动场景的 lower 地图')
+    fs=snapshot.get('floor_state',{})
+    active=fs.get('active_nav_floor');actual=fs.get('actual_floor')
+    map_key=fs.get('floors',{}).get(active,{}).get('map_key','lower')
+    if data.get('scene') != scene or data.get('floor') != map_key or (fs and (not actual or actual!=active)):
+        raise PreviewError('平地预览必须使用机器人实际楼层的导航地图')
     goal = {}
     for key in ('x', 'y', 'yaw'):
         value = data.get(key)
@@ -65,7 +68,7 @@ def validate_request(data, scene, maps, snapshot):
     pose = snapshot.get('pose', {})
     if not all(isinstance(pose.get(k), (int, float)) and math.isfinite(pose[k]) for k in ('x', 'y', 'yaw')):
         raise PreviewError('缺少有效起点位姿')
-    meta = maps[scene]['lower'][0]
+    meta = maps[scene][map_key][0]
     dx, dy = goal['x'] - meta['origin'][0], goal['y'] - meta['origin'][1]
     a = meta['origin'][2]
     u = (math.cos(a)*dx + math.sin(a)*dy)/meta['resolution']
@@ -112,10 +115,12 @@ class PreviewPlanner:
             return self.costmap_cache
 
     def costmap_view(self, scene, floor):
-        if scene != self.scene or floor != 'lower':
+        fs=self.snapshot().get('floor_state',{})
+        key=fs.get('floors',{}).get(fs.get('active_nav_floor'),{}).get('map_key','lower')
+        if scene != self.scene or floor != key or (fs and not fs.get('active_nav_floor')):
             raise PreviewError('当前场景或楼层未加载预览规划器', 'costmap_scene')
         grid = self.costmap()
-        return dict(ok=True, scene=self.scene, floor='lower',
+        return dict(ok=True, scene=self.scene, floor=key,
                     **{k:v for k,v in grid.items() if k != 'received'},
                     age_sec=time.monotonic()-grid['received'])
 
@@ -184,7 +189,7 @@ class PreviewPlanner:
             points = [[p.pose.position.x, p.pose.position.y] for p in path.poses]
             if not all(math.isfinite(x) and math.isfinite(y) for x, y in points):
                 raise PreviewError('规划返回了无效坐标')
-            return dict(ok=True, preview_only=True, scene=self.scene, floor='lower',
+            return dict(ok=True, preview_only=True, scene=self.scene, floor=data['floor'],
                         map_id=identity[2], localization_session=identity[0], localization_epoch=identity[1],
                         start=start, goal=goal, points=points,
                         _path=[dict(x=p.pose.position.x,y=p.pose.position.y,yaw=math.atan2(2*p.pose.orientation.w*p.pose.orientation.z,1-2*p.pose.orientation.z**2)) for p in path.poses],

@@ -18,7 +18,7 @@ PORTS=set(TARGETS.get('tcp_ports',[8767]))
 if any(not isinstance(p,int) or p<1024 or p in (7447,8010) for p in PORTS):raise ValueError('unsafe service port in stop configuration')
 SCRIPTS={
  'start_stack.py':'starter','switch_map.py':'starter',
- 'web_view.py':'web','navigate_to_goal.py':'mission','mission_live.py':'mission',
+ 'web_view.py':'web','navigate_to_goal.py':'mission','mission_live.py':'mission','multifloor_mission.py':'mission',
  'nav2_bringup.launch.py':'navigation','planner_preview.launch.py':'planner',
  'cloud_scan.py':'scan','localization_live.py':'localization'}
 

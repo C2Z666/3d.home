@@ -98,6 +98,8 @@ def main():
             fcntl.flock(mission, fcntl.LOCK_EX | fcntl.LOCK_NB)
             if node.get_publishers_info_by_topic('/d1/sdk/supervised_cmd_vel'):
                 raise RuntimeError('存在速度发布者，请先结束当前控制任务，再启动服务')
+            if node.get_publishers_info_by_topic('/d1/sdk/stair_cmd_vel'):
+                raise RuntimeError('存在楼梯速度发布者，请先结束当前控制任务')
             for key in ('camera', 'lidar', 'imu'):
                 if time.monotonic() - received.get(key, -1e9) > 2:
                     raise RuntimeError('底层传感器未输出：' + topics[key][0] + '；请检查机器狗原厂传感器服务')
@@ -112,7 +114,7 @@ def main():
             ensure('localization', str(ROOT / 'scripts/localization_live.py'), script('run_localization.sh'), 'localization_live.py')
             ensure('cloud_scan', str(ROOT / 'scripts/cloud_scan.py'), script('run_cloud_scan.sh'), 'cloud_scan.py')
             ensure('planner_preview', str(ROOT / 'scripts/planner_preview.launch.py'), script('run_planner_preview.sh') + ['scene:=old'])
-            ensure('navigation_nav2', str(ROOT / 'scripts/nav2_bringup.launch.py'), script('run_nav2.sh') + ['floor:=lower'], 'controller_server')
+            ensure('navigation_nav2', str(ROOT / 'scripts/nav2_bringup.launch.py'), script('run_nav2.sh') + ['floor:=auto'], 'controller_server')
             mission.close()
         end = time.monotonic() + args.wait; next_print = 0
         while time.monotonic() < end:
@@ -138,7 +140,8 @@ def main():
                     web_error = str(e)
                 costmap_ok = False; costmap_error = ''
                 try:
-                    grid = read_web('preview-costmap?scene=old&floor=lower')
+                    fs=web.get('floor_state',{});key=fs.get('floors',{}).get(fs.get('active_nav_floor'),{}).get('map_key','lower')
+                    grid = read_web('preview-costmap?scene=old&floor='+key)
                     costmap_ok = grid.get('ok') is True and grid.get('age_sec', 99) < 2
                 except Exception as e:
                     costmap_error = str(e)

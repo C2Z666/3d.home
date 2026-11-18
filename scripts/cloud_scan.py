@@ -4,6 +4,7 @@ import argparse,collections,json,math,time
 from pathlib import Path
 import numpy as np,yaml
 from geometry import calibration,imu_from_base,pose_matrix,planar,interpolate,transform,LIO_TO_NAV,navigation_pose
+from cloud_pairing import CloudQueue
 
 
 def cloud_xyz(m):
@@ -45,7 +46,7 @@ def main():
  from nav_msgs.msg import Odometry
  from sensor_msgs.msg import PointCloud2,LaserScan
  from std_msgs.msg import String
- rclpy.init();n=rclpy.create_node('d1_cloud_scan');history=collections.deque(maxlen=100);pending=None
+ rclpy.init();n=rclpy.create_node('d1_cloud_scan');history=collections.deque(maxlen=100);pending=None;clouds=CloudQueue()
  last=-math.inf;fault='waiting for calibrated cloud and odometry';points=0;projection_info={}
  pub=n.create_publisher(LaserScan,'/d1/nav/scan',qos_profile_sensor_data);health=n.create_publisher(String,'/d1/nav/scan_status',1)
  def stamp(h):return h.stamp.sec+h.stamp.nanosec*1e-9
@@ -54,13 +55,13 @@ def main():
   if m.header.frame_id!=c['odom_frame'] or m.child_frame_id!=c['body_frame']:fault='FAST-LIO frame mismatch';history.clear();return
   t=stamp(m.header)
   if abs(n.get_clock().now().nanoseconds*1e-9-t)>.5:return
-  if history and t<=history[-1][0]:history.clear()
+  if history and t<=history[-1][0]:history.clear();clouds.clear()
   history.append((t,pose_matrix(m.pose.pose)@I_B))
  def cloud(m):
-  nonlocal pending
-  pending=m
+  clouds.add(stamp(m.header),m)
  def tick():
   nonlocal pending,last,fault,points
+  if history:pending=clouds.take(n.get_clock().now().nanoseconds*1e-9,history[0][0],history[-1][0])
   if pending is not None:
    m=pending;t=stamp(m.header)
    if m.header.frame_id!=c['cloud_frame']:fault='raw cloud frame mismatch';pending=None

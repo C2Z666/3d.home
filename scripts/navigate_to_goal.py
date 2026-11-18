@@ -51,14 +51,22 @@ def main():
  p.add_argument('--max-runtime',type=float,default=10.,help='Maximum seconds from goal submission through stopped confirmation (default: 10)')
  p.add_argument('--path-file',type=Path,help='Approved initial path; bounded endpoint reacquisition may replan to the same goal')
  p.add_argument('--owner-pid',type=int,help='Stop if the owning web process exits')
+ p.add_argument('--lease-fd',type=int,help=argparse.SUPPRESS)
+ p.add_argument('--floor',help='Floor identity of this flat navigation segment')
  args=p.parse_args()
  if not math.isfinite(args.max_runtime) or args.max_runtime<=0: p.error('--max-runtime must be finite and positive')
  target={key:getattr(args,key) for key in ('x','y','z','yaw')}
  if not all(math.isfinite(v) for v in target.values()): p.error('target coordinates must be finite')
  (root/'work').mkdir(exist_ok=True)
- lease=(root/'work/navigation_mission.lock').open('a')
- try:fcntl.flock(lease,fcntl.LOCK_EX|fcntl.LOCK_NB)
- except BlockingIOError:p.error('another navigation supervisor already owns this repository')
+ if args.lease_fd is None:
+  lease=(root/'work/navigation_mission.lock').open('a')
+  try:fcntl.flock(lease,fcntl.LOCK_EX|fcntl.LOCK_NB)
+  except BlockingIOError:p.error('another navigation supervisor already owns this repository')
+ else:
+  lease=os.fdopen(os.dup(args.lease_fd),'a')
+  if os.fstat(lease.fileno()).st_ino!=(root/'work/navigation_mission.lock').stat().st_ino:p.error('invalid inherited mission lease')
+  try:fcntl.flock(lease,fcntl.LOCK_EX|fcntl.LOCK_NB)
+  except BlockingIOError:p.error('inherited descriptor does not own the mission lease')
  approved=None
  if args.path_file:
   approved=json.loads(args.path_file.read_text())
@@ -69,6 +77,11 @@ def main():
  from site_identity import verify
  scene=scene_bundle(root,args.scene)
  map_id=verify(root) if args.scene=='old' else scene['map_id']
+ from floor_routes import load_registry,read_state,floor_id
+ floor_registry=load_registry(root,scene);floor_state=read_state(root,floor_registry)
+ segment_floor=floor_id(floor_registry,args.floor) if args.floor else floor_state['actual_floor']
+ if not segment_floor or floor_state['active_nav_floor']!=segment_floor or floor_state['actual_floor']!=segment_floor:
+  p.error('机器人实际楼层与导航地图不一致，禁止平地导航')
  if not cfg.get('maps_validated') or not cfg.get('scan_source_validated'):
   p.error('review the selected map and current scan, then run validate_site.py')
  import rclpy
@@ -380,6 +393,9 @@ def main():
     try:os.kill(args.owner_pid,0)
     except ProcessLookupError:fault('[OWNER_LOST] 网页服务进程已退出');continue
    if n.count_publishers('/d1/sdk/supervised_cmd_vel')>1:fault('[MULTIPLE_CONTROLLERS] 检测到多个速度发布者');continue
+   current_floor=read_state(root,floor_registry)
+   if current_floor['actual_floor']!=segment_floor or current_floor['active_nav_floor']!=segment_floor:
+    fault('[FLOOR_CHANGED] 平地执行期间楼层或导航地图改变');continue
    if execution_deadline is not None and now>=execution_deadline:
     runtime_expired=True
     fault('[MAX_RUNTIME_EXCEEDED] 最大运行时间 %.1fs 已到，已运行 %.2fs；取消任务并发送最后一次零速，随后停止所有速度发布，不自动恢复。' % (args.max_runtime,now-execution_started))

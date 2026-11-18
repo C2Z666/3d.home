@@ -144,6 +144,10 @@ public:
     speed_level_ = declare_parameter<int>("speed_level", 1);
     trace_control_ = declare_parameter<bool>("trace_control", false);
     allow_terminal_reverse_ = declare_parameter<bool>("allow_terminal_reverse", false);
+    stair_max_lin_vel_ = declare_parameter<double>("stair_max_lin_vel", 0.0);
+    if (!std::isfinite(stair_max_lin_vel_) || stair_max_lin_vel_ < 0.0 || stair_max_lin_vel_ > 0.5) {
+      throw std::invalid_argument("stair_max_lin_vel must be in [0, 0.5]");
+    }
     const auto ip = declare_parameter<std::string>("robot_ip", "192.168.168.168");
     const int port = declare_parameter<int>("robot_port", 8082);
     if (port <= 0 || port > 65535 || speed_level_ < 1 || speed_level_ > 3 ||
@@ -156,6 +160,7 @@ public:
 
     cmd_sub_ = create_subscription<geometry_msgs::msg::Twist>("cmd_vel", rclcpp::QoS(1),
       [this](geometry_msgs::msg::Twist::ConstSharedPtr msg) {
+        if (stair_selected_ || motion_ == MotionStatus::MOTION_STATUS_STAIR) {return;}
         if (!std::isfinite(msg->linear.x) || !std::isfinite(msg->linear.y) ||
           !std::isfinite(msg->angular.z) || !std::isfinite(msg->linear.z) ||
           !std::isfinite(msg->angular.x) || !std::isfinite(msg->angular.y) ||
@@ -181,6 +186,23 @@ public:
         {
           StopMotion();
         }
+      });
+    stair_permit_sub_ = create_subscription<std_msgs::msg::Bool>("stair_motion_permit", rclcpp::QoS(1),
+      [this](std_msgs::msg::Bool::ConstSharedPtr msg) {
+        stair_motion_permit_ = msg->data && stair_selected_ && !stair_fault_ &&
+          motion_ == MotionStatus::MOTION_STATUS_STAIR && BridgeBaseMotionPermitted();
+        stair_permit_time_ = Clock::now();
+        if (!stair_motion_permit_ && stair_selected_) {StopMotion();}
+      });
+    stair_cmd_sub_ = create_subscription<geometry_msgs::msg::Twist>("stair_cmd_vel", rclcpp::QoS(1),
+      [this](geometry_msgs::msg::Twist::ConstSharedPtr msg) {
+        if (!StairMotionPermitted() || !std::isfinite(msg->linear.x) || msg->linear.x < 0.0 ||
+          msg->linear.y != 0.0 || msg->linear.z != 0.0 || msg->angular.x != 0.0 ||
+          msg->angular.y != 0.0 || msg->angular.z != 0.0) {StopMotion(); return;}
+        last_cmd_ = Clock::now(); have_cmd_ = true; watchdog_lost_ = false;
+        target_ = geometry_msgs::msg::Twist();
+        target_.linear.x = std::min(msg->linear.x, stair_max_lin_vel_);
+        if (target_.linear.x == 0.0) {StopMotion();}
       });
     reverse_sub_ = create_subscription<std_msgs::msg::Bool>("terminal_reverse_permit", rclcpp::QoS(1),
       [this](std_msgs::msg::Bool::ConstSharedPtr msg) {
@@ -340,6 +362,7 @@ private:
     // SDK 0.2.1's posture matrix lists CrawlWalk and DSB as Move-capable.
     // Use reported state, never the requested posture, to permit motion.
     return motion_ == MotionStatus::MOTION_STATUS_WALK ||
+           motion_ == MotionStatus::MOTION_STATUS_STAIR ||
            motion_ == MotionStatus::MOTION_STATUS_CRAWL_WALK ||
            motion_ == MotionStatus::MOTION_STATUS_CLIMB ||
            motion_ == MotionStatus::MOTION_STATUS_GAIT ||
@@ -385,6 +408,8 @@ private:
     ++pose_request_id_;
     pose_request_state_sequence_ = state_sequence_;
     StopMotion();
+    stair_selected_ = action == "stair";
+    stair_fault_ = false; stair_motion_permit_ = false; have_cmd_ = false;
     const auto request_started = Clock::now();
     gait_selected_ = action == "gait";
     gait_fault_ = false;
@@ -409,6 +434,9 @@ private:
     } else if (action == "climb") {
       expected_ = MotionStatus::MOTION_STATUS_CLIMB;
       ec = sdk_->Climb();
+    } else if (action == "stair") {
+      expected_ = MotionStatus::MOTION_STATUS_STAIR;
+      ec = sdk_->Stair();
     } else if (action == "gait") {
       expected_ = MotionStatus::MOTION_STATUS_GAIT;
       const auto generation = ++gait_generation_;
@@ -483,7 +511,10 @@ private:
       pose_sent_ = Clock::now();
       pose_warned_ = false;
       Check(sdk_->Locked(), "Locked");
-    } else if (action == "standup" || action == "balance_standup" ||
+    } else if (action == "stair" && stair_max_lin_vel_ <= 0.0) {
+      StopMotion();
+      RCLCPP_WARN(get_logger(), "Stair disabled: configure a stair speed cap explicitly");
+    } else if (action == "standup" || action == "balance_standup" || action == "stair" ||
       action == "liedown" || action == "crawl" || action == "crawl_walk" ||
       action == "climb" || action == "gait" ||
       action == "slim" || action == "dsb" || action == "sand")
@@ -525,6 +556,7 @@ private:
       available = std::exchange(events_->control_available, false);
     }
     if (lost || !sdk_->IsConnected()) {
+      if (stair_selected_) {stair_fault_ = true; stair_motion_permit_ = false;}
       if (control_held_) {RCLCPP_WARN(get_logger(), "Control lost; pausing motion");}
       control_held_ = false;
       chain_ = Chain::NONE;
@@ -624,7 +656,7 @@ private:
     return "ready";
   }
 
-  bool BridgeMotionPermitted() const
+  bool BridgeBaseMotionPermitted() const
   {
     return Controlled() && CanMove() &&
            !pose_pending_ && !soft_stop_ && !hardware_stop_ &&
@@ -633,9 +665,27 @@ private:
            (gait_acknowledged_ && !gait_fault_ && motion_ == MotionStatus::MOTION_STATUS_GAIT));
   }
 
+  bool StairMotionPermitted() const
+  {
+    return stair_selected_ && !stair_fault_ && stair_max_lin_vel_ > 0.0 &&
+      motion_ == MotionStatus::MOTION_STATUS_STAIR && BridgeBaseMotionPermitted() &&
+      pose_confirmed_id_ == pose_request_id_ && stair_motion_permit_ &&
+      Age(stair_permit_time_) < watchdog_timeout_;
+  }
+
+  bool BridgeMotionPermitted() const
+  {
+    if (stair_selected_ || motion_ == MotionStatus::MOTION_STATUS_STAIR) {return StairMotionPermitted();}
+    return BridgeBaseMotionPermitted();
+  }
+
   void Tick()
   {
     ProcessEvents();
+    if (stair_selected_ && !pose_pending_ &&
+      (!BridgeBaseMotionPermitted() || motion_ != MotionStatus::MOTION_STATUS_STAIR)) {
+      stair_fault_ = true; stair_motion_permit_ = false;
+    }
     std_msgs::msg::Bool readiness;
     const std::string reason = MotionReadyReason();
     readiness.data = reason == "ready";
@@ -691,6 +741,9 @@ private:
       << ",\"cmd_age_sec\":" << (have_cmd_ ? Age(last_cmd_) : -1.0)
       << ",\"move_write_ok\":" << events_->move_write_ok.load()
       << ",\"move_write_failed\":" << events_->move_write_failed.load()
+      << ",\"stair_speed_cap\":" << stair_max_lin_vel_
+      << ",\"stair_motion_permitted\":" << (StairMotionPermitted() ? "true" : "false")
+      << ",\"stair_fault\":" << (stair_fault_ ? "true" : "false")
       << ",\"speed_level\":" << speed_level_
       << ",\"limits_vx_wz_ax_aw\":[" << max_lin_vel_ << "," << max_ang_vel_ << "," << max_lin_accel_ << "," << max_ang_accel_ << "]}";
     std_msgs::msg::String status;
@@ -750,6 +803,11 @@ private:
 
   std::shared_ptr<SDKEvents> events_{std::make_shared<SDKEvents>()};
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr stair_cmd_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr stair_permit_sub_;
+  double stair_max_lin_vel_{0.0};
+  bool stair_selected_{false}, stair_fault_{false}, stair_motion_permit_{false};
+  Clock::time_point stair_permit_time_;
   rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr speed_sub_, posture_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr action_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr reverse_sub_;

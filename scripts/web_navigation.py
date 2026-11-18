@@ -24,6 +24,7 @@ class NavigationManager:
             from map_versions import busy
             if busy(self.root):raise ValueError('地图正在切换')
             if data.get('confirmed') is not True:raise ValueError('需要明确确认后才能执行导航')
+            if self.process is not None and self.process.poll() is None:raise ValueError('已有导航进程，请等待停止完成')
             if self.task and self.task['state'] not in ('SUCCEEDED','CANCELED','FAILED'):raise ValueError('已有导航任务，请先停止或等待结束')
             runtime=data.get('max_runtime',10.)
             if isinstance(runtime,bool) or not isinstance(runtime,(int,float)) or not math.isfinite(runtime) or runtime<=0:raise ValueError('最大运行时间必须是大于 0 的有限秒数')
@@ -31,10 +32,23 @@ class NavigationManager:
             if not entry or time.monotonic()-entry['created']>=60:raise ValueError('预览已过期或已执行，请重新规划')
             plan=entry['plan'];snap=self.preview.snapshot();loc=snap.get('localization',{});pose=snap.get('pose',{});sdk=snap.get('sdk',{})
             if not snap.get('navigation_ready'):raise ValueError('当前定位未就绪，不能开始导航')
+            fs=snap.get('floor_state',{})
+            if fs and (not fs.get('actual_floor') or fs.get('active_nav_floor')!=fs['actual_floor']):raise ValueError('实际楼层与导航地图未就绪')
+            if fs and fs.get('floors',{}).get(fs['actual_floor'],{}).get('map_key')!=plan['floor']:
+                raise ValueError('预览路径所属楼层已变化，请重新规划')
+            if 'mission' in plan:
+                from floor_routes import load_registry
+                from scene_registry import scene_bundle
+                registry=load_registry(self.root,scene_bundle(self.root,plan['scene']))
+                if registry['revision']!=plan['mission']['registry_revision'] or fs.get('actual_floor')!=plan['mission']['source_floor']:
+                    raise ValueError('楼层连接或出发楼层已变化，请重新规划')
+                if any(sdk.get('stair_speed_cap',0)<c['control']['cruise_speed'] for c in plan['mission']['connections']):
+                    raise ValueError('SDK 桥接未启用所需的 Stair 速度上限')
             if (loc.get('map_id'),loc.get('session'),loc.get('epoch'))!=(plan['map_id'],plan['localization_session'],plan['localization_epoch']):raise ValueError('定位身份已变化，请重新规划')
             if math.hypot(pose['x']-plan['start']['x'],pose['y']-plan['start']['y'])>.15 or abs(math.atan2(math.sin(pose['yaw']-plan['start']['yaw']),math.cos(pose['yaw']-plan['start']['yaw'])))>.25:raise ValueError('机器人起点已变化，请重新规划')
             if snap.get('sdk_age',99)>.4 or not all(sdk.get(k) is True for k in ('sdk_connected','control_held','state_fresh')) or any(sdk.get(k) is not False for k in ('soft_stop','hardware_stop')):raise ValueError('SDK bridge 未就绪或急停未解除；请查看桥接日志')
             if self.preview.node.get_publishers_info_by_topic('/d1/sdk/supervised_cmd_vel'):raise ValueError('已有其他速度发布者，拒绝并行控制')
+            if self.preview.node.get_publishers_info_by_topic('/d1/sdk/stair_cmd_vel'):raise ValueError('已有楼梯速度发布者，拒绝并行控制')
             import yaml
             site=yaml.safe_load((self.root/'config/site.yaml').read_text())
             if not site.get('maps_validated') or not site.get('scan_source_validated'):raise ValueError('地图/扫描核对记录尚未完成')
@@ -44,10 +58,14 @@ class NavigationManager:
             route=self.directory/(task_id+'.path.json')
             route.write_text(json.dumps({'plan':plan,'poses':entry['path']},allow_nan=False))
             args=['bash',str(self.root/'scripts/run_mission.sh'),'--live','--scene',plan['scene'],'--x',str(plan['goal']['x']),'--y',str(plan['goal']['y']),'--yaw',str(plan['goal']['yaw']),'--z',str(pose['z']),'--max-runtime',str(runtime),'--path-file',str(route),'--owner-pid',str(os.getpid())]
+            if 'mission' in plan:
+                args=['bash',str(self.root/'scripts/run_multifloor.sh'),'--live','--max-runtime',str(runtime),'--path-file',str(route),'--owner-pid',str(os.getpid())]
+            elif fs:args+=['--floor',fs['actual_floor']]
             self.process=subprocess.Popen(args,cwd=self.root,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,encoding='utf-8',errors='replace',bufsize=1,start_new_session=True)
             self.plans.pop(data['plan_id'])
             self.lines.clear();self.started_mono=None;self.finished_mono=None
             self.task=dict(task_id=task_id,state='PREPARING',goal=plan['goal'],max_runtime=runtime,created_at=time.time(),started_at=None,reason='已确认，正在检查执行条件',log_file=str(self.directory/(task_id+'.log')))
+            self.task.update(multifloor='mission' in plan,target_floor=plan.get('target_floor',fs.get('actual_floor')),source_floor=fs.get('actual_floor'))
             thread=threading.Thread(target=self._monitor,args=(self.process,task_id),daemon=True);thread.start()
             print('[NAV_CONFIRM] '+json.dumps(self.task,ensure_ascii=False),flush=True)
             return self.snapshot()
@@ -59,7 +77,12 @@ class NavigationManager:
                 log.write(formatted+'\n');print('[NAV '+task_id[:8]+'] '+line,flush=True)
                 with self.lock:
                     self.lines.append(formatted)
-                    if line.startswith('[NAV_EVENT] '):
+                    if line.startswith('[MULTIFLOOR_EVENT] '):
+                        try:
+                            event=json.loads(line.split(' ',1)[1])
+                            if event.get('task_id')==task_id:self.task.update(state=event['state'],phase=event['state'],reason=event.get('reason',''),stair_evidence=event.get('evidence'))
+                        except (ValueError,KeyError):pass
+                    if line.startswith('[NAV_EVENT] ') and not self.task.get('multifloor'):
                         try:
                             event=json.loads(line[len('[NAV_EVENT] '):])
                             if event.get('task_id')==task_id:
@@ -67,7 +90,8 @@ class NavigationManager:
                                 self.task.update(state=display,phase=phase,recovery=event.get('recovery'))
                         except (ValueError,KeyError):pass
                     if line.startswith('[START]'):
-                        self.started_mono=time.monotonic();self.task.update(state='RUNNING',started_at=time.time(),reason=line)
+                        if self.started_mono is None:self.started_mono=time.monotonic();self.task.update(started_at=time.time())
+                        self.task.update(state='RUNNING',reason=line)
                     elif line.startswith('[ALIGN_YAW]'):self.task.update(state='ALIGNING',reason=line)
                     elif line.startswith('[ALIGN_PATH]'):self.task.update(state='ALIGNING_PATH',reason=line)
                     elif line.startswith('[TRACK_PATH]'):self.task.update(state='RUNNING',reason=line)
@@ -131,3 +155,39 @@ class NavigationManager:
         if process is not None:
             try:process.wait(timeout=4)
             except subprocess.TimeoutExpired:process.terminate()
+
+    def manual_initialize(self,data):
+        import fcntl
+        from floor_routes import load_registry,floor_id
+        from scene_registry import scene_bundle
+        from floor_map_control import activate_maps,wait
+        from rcl_interfaces.srv import SetParametersAtomically
+        from rcl_interfaces.msg import Parameter,ParameterValue
+        with self.lock:
+            if data.get('confirmed') is not True:raise ValueError('请确认手动初值')
+            if self.process is not None and self.process.poll() is None:raise ValueError('请先停止当前任务')
+            scene=scene_bundle(self.root,self.preview.scene);registry=load_registry(self.root,scene)
+            if data.get('scene')!=self.preview.scene:raise ValueError('只能标定当前启用场景')
+            fid=floor_id(registry,data.get('floor'))
+            for topic in ('/d1/sdk/supervised_cmd_vel','/d1/sdk/stair_cmd_vel'):
+                if self.preview.node.get_publishers_info_by_topic(topic):raise ValueError('存在运动发布者，请先结束控制任务')
+            lease=(self.root/'work/navigation_mission.lock').open('a')
+            try:
+                fcntl.flock(lease,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                snap=self.preview.snapshot();loc=snap.get('localization',{})
+                request=dict(data,map_id=scene['map_id'],floor_id=fid,session=loc.get('session'),epoch=loc.get('epoch'))
+                client=self.preview.node.create_client(SetParametersAtomically,'/d1/localization/manual_initialize')
+                try:
+                    if not client.wait_for_service(timeout_sec=2):raise ValueError('手动定位服务未就绪')
+                    req=SetParametersAtomically.Request()
+                    req.parameters=[Parameter(name='initial_pose',value=ParameterValue(type=4,string_value=json.dumps(request,allow_nan=False)))]
+                    result=wait(client.call_async(req)).result
+                    if not result.successful:raise ValueError(result.reason)
+                finally:self.preview.node.destroy_client(client)
+                self.plans.clear()
+                try:activate_maps(self.preview.node,self.root,scene,registry,fid)
+                except RuntimeError as e:raise ValueError('手动初值已应用，但楼层导航地图尚未就绪：'+str(e)) from e
+                self.preview.costmap_cache=None
+                return dict(ok=True,message='手动初值已应用，FAST-LIO保持运行；旧规划已失效',floor_id=fid)
+            except BlockingIOError:raise ValueError('当前有其他导航或标定任务')
+            finally:lease.close()
