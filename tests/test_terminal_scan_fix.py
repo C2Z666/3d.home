@@ -7,15 +7,15 @@ import numpy as np
 class Regression(unittest.TestCase):
  def test_sdk_reports_count_during_window(self):
   r=SettledGoalReview()
-  for t,seq in [(0,327),(.5,328),(1.01,328)]:a=r.update([.178,0,.11],[0,0,0],t,t,True,seq,[0,0,0])
+  for t,seq in [(0,327),(.5,328),(1.01,328)]:a=r.update([.178,0,.09],[0,0,0],t,t,True,seq,[0,0,0])
   self.assertEqual(a,'DONE')
  def test_one_sdk_report_cannot_finish(self):
   r=SettledGoalReview()
-  for t in [0,.5,1.1]:a=r.update([.178,0,.11],[0,0,0],t,t,True,327,[0,0,0])
+  for t in [0,.5,1.1]:a=r.update([.178,0,.09],[0,0,0],t,t,True,327,[0,0,0])
   self.assertEqual(a,'WAIT')
  def test_real_motion_does_not_finish(self):
   r=SettledGoalReview()
-  for t in [0,.5,1.1]:a=r.update([.178,0,.11],[0,0,0],t,t,True,int(t*10),[t*.03,0,0])
+  for t in [0,.5,1.1]:a=r.update([.178,0,.09],[0,0,0],t,t,True,int(t*10),[t*.03,0,0])
   self.assertEqual(a,'WAIT')
  def cfg(self):return dict(range_min_m=.3,range_max_m=8.,base_height_m=.47,obstacle_min_above_floor_m=.12,obstacle_max_above_floor_m=1.2,floor_edge_support_filter=True)
  def test_isolated_floor_edge_removed(self):

@@ -70,6 +70,13 @@ class NavigationManager:
                     elif line.startswith('[ALIGN_PATH]'):self.task.update(state='ALIGNING_PATH',reason=line)
                     elif line.startswith('[TRACK_PATH]'):self.task.update(state='RUNNING',reason=line)
                     elif line.startswith('[CONTROL]'):self.task.update(reason=line)
+                    elif line.startswith(('[CLOSED_LOOP_POSITION]','[CLOSED_LOOP_YAW]','[POSITION_FINISHED]','[POSITION_ATTEMPT]')):self.task.update(reason=line)
+                    elif line.startswith('[FINAL_ERROR]'):
+                        try:
+                            self.task['final_position_error_m']=float(line.split('position_error=')[1].split('m')[0])
+                            self.task['final_yaw_error_rad']=float(line.split('yaw_error=')[1].split('rad')[0])
+                        except (ValueError,IndexError):pass
+                    elif line.startswith('[POSITION_APPROXIMATE]'):self.task.update(position_approximate=True)
                     elif line.startswith('[STOPPING]'):self.task.update(state='STOPPING',reason=line)
                     elif line.startswith('[REACQUIRE_STOP]'):self.task.update(state='REACQUIRING',reason=line)
                     elif line.startswith('[REPLAN]'):self.task.update(state='REPLANNING',reason=line)
@@ -82,7 +89,9 @@ class NavigationManager:
             with self.lock:
                 self.finished_mono=time.monotonic()
                 self.task.update(state='SUCCEEDED' if code==0 else 'CANCELED' if code==130 or self.task['state']=='CANCELING' else 'FAILED',exit_code=code,finished_at=time.time())
-                if code==0:self.task['reason']='已到达目标并确认停稳'
+                if code==0:
+                    position=self.task.get('final_position_error_m');angle=self.task.get('final_yaw_error_rad')
+                    self.task['reason']=('朝向完成并确认停稳；位置误差 %.3fm，朝向误差 %.4frad%s' % (position,angle,'（位置近似）' if self.task.get('position_approximate') else '')) if position is not None and angle is not None else '执行完成并确认停稳；详见阶段日志'
                 elif self.task['state']=='CANCELED':self.task['reason']='操作者已取消导航'
                 elif 'FAULT:' not in self.task['reason']:self.task['reason']='执行进程退出，退出码 '+str(code)+'；请查看阶段日志'
                 (self.directory/(task_id+'.result.json')).write_text(json.dumps(self.task,ensure_ascii=False,indent=2))

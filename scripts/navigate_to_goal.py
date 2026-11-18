@@ -4,6 +4,7 @@ import argparse,json,math,signal,sys,time,os,fcntl
 from pathlib import Path
 import yaml,hashlib
 from mission_runtime import RecoveryBudget, MissionTrace
+from terminal_feedback import TerminalApproach, TerminalYaw
 from navigation_control import HeadingAlignment, MotionGuard, rotation_clearance, quaternion_yaw, wrap, initial_path_heading, scan_input_state, POSITION_TOLERANCE, POSITION_RELEASE, replan_errors, settled_goal_action, SettledGoalReview, RECOVERABLE_INPUT_PHASES
 
 MAX_LINEAR_SPEED = 0.15
@@ -99,6 +100,7 @@ def main():
  sdk_at=loc_at=pose_at=raw_at=odom_at=scan_at=-math.inf
  sdk_identity=None; loc_identity=None; walk_gate=WalkGate()
  yaw_priority_latched=False; yaw_position_limit=.35
+ terminal_approach=None; approach_attempted=False; terminal_started=None; yaw_attempts=0; yaw_feedback=TerminalYaw(); control_at=-math.inf; next_feedback_log=0.
  execution_started=None; execution_deadline=None; next_countdown=None; runtime_expired=False
  state='WAIT'; deadline=time.monotonic()+60; goal=None; result=None; terminal=False; failed=''; stop_sequences=set(); halt_at=None
  scan_stamp=None;scanhealth={}; health_at=-math.inf; next_wait_log=0.
@@ -114,9 +116,11 @@ def main():
  trace=MissionTrace(root/'work/navigation',task_id)
  trace.emit('mission',goal=target,scene=args.scene,map_id=map_id,max_runtime=args.max_runtime,source_hashes={name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in ('scripts/navigate_to_goal.py','scripts/mission_runtime.py','config/calibration.yaml','config/nav2.yaml')},bridge_actual_semantics='normalized SDK Move request; transport counters do not prove physical execution')
  def transition(next_state,reason=''):
-  nonlocal state,raw,raw_at,command_missing_at,first_command_seen,yaw_priority_latched
+  nonlocal state,raw,raw_at,command_missing_at,first_command_seen,yaw_priority_latched,terminal_started
   old=state
-  if next_state=='STOPPING' and old in ('WAIT','REPLAN','NAVIGATE','ACCEPT'):yaw_priority_latched=True
+  if next_state=='STOPPING' and old in ('WAIT','REPLAN','NAVIGATE','ACCEPT'):
+   yaw_priority_latched=True
+   if terminal_started is None:terminal_started=time.monotonic()
   if old==next_state:return
   if next_state in ('FAULT','INPUT_PAUSE','REACQUIRE_STOP','REPLAN','STOPPING','DONE','ACCEPT'):
    zero();raw=None;raw_at=-math.inf
@@ -273,7 +277,7 @@ def main():
  def at_target():
   q=pose.pose.orientation; yaw=math.atan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z))
   angle=math.atan2(math.sin(yaw-target['yaw']),math.cos(yaw-target['yaw']))
-  return math.hypot(pose.pose.position.x-target['x'],pose.pose.position.y-target['y'])<=(yaw_position_limit if yaw_priority_latched else POSITION_RELEASE) and abs(angle)<.13
+  return math.hypot(pose.pose.position.x-target['x'],pose.pose.position.y-target['y'])<=(yaw_position_limit if yaw_priority_latched else POSITION_RELEASE) and abs(angle)<.10
  def tf_reason():
   try:
    t=tf_buffer.lookup_transform('map','nav_base',Time())
@@ -362,11 +366,13 @@ def main():
     print('[ALIGN_METRICS] '+json.dumps(alignment.diagnostics(pos,current_odom())),flush=True)
    next_control_log=now+1
  print('Navigating to map goal: '+str(target),flush=True)
- print('[CONTROLLER] DWB StandardTrajectoryGenerator -> OPEN_LOOP smoother -> supervisor -> SDK bridge; position_acquire=0.15m, position_settle=0.20m, final_yaw=0.10rad, turn_cap=0.30rad/s; progress includes rotation.',flush=True)
+ print('[CONTROLLER] DWB StandardTrajectoryGenerator -> OPEN_LOOP smoother -> supervisor -> SDK bridge; terminal_handoff=0.25m, position_envelope=0.35m, final_yaw_accept=0.10rad; source_feedback=10Hz observed, control_refresh<=20Hz, final_turn_cap=0.25rad/s; progress includes rotation.',flush=True)
  print('[LIMIT] max-runtime=%.1fs; starts at goal submission, includes acceptance/navigation/stopping; countdown every 5s.' % args.max_runtime,flush=True)
  try:
   while rclpy.ok() and state not in ('FAULT','DONE'):
-   rclpy.spin_once(n,timeout_sec=.03); now=time.monotonic();observe(now)
+   rclpy.spin_once(n,timeout_sec=.005); now=time.monotonic();observe(now)
+   if now-control_at<.05:continue
+   control_at=now
    if interrupted: fault('[CANCELED] 操作者取消或服务关闭'); continue
    if args.owner_pid:
     try:os.kill(args.owner_pid,0)
@@ -379,6 +385,7 @@ def main():
    if next_countdown is not None and now>=next_countdown:
     print('[COUNTDOWN] 执行剩余 %.1fs / 上限 %.1fs；状态 %s' % (max(0.,execution_deadline-now),args.max_runtime,state),flush=True)
     next_countdown=execution_started+(math.floor((now-execution_started)/5)+1)*5
+   if terminal_started is not None and now-terminal_started>45.:fault('[TERMINAL_TIMEOUT] 终点闭环超过45秒，未满足朝向和停稳结束条件');continue
    if state=='INPUT_PAUSE' and budget.wait_error(now):fault(budget.wait_error(now));continue
    if now>deadline:
     position=None if pose is None else [pose.pose.position.x,pose.pose.position.y]
@@ -469,10 +476,10 @@ def main():
     execution_started=now; execution_deadline=now+args.max_runtime; next_countdown=now+5; deadline=execution_deadline
     print('[START] Walk 已稳定确认%s；最大运行时间 %.1fs，剩余 %.1fs；到时自动终止并停止速度发布。' % ('，未重复发送 standup' if walk_gate.request_before is None else '',args.max_runtime,args.max_runtime),flush=True)
     pos=current_pose();heading=initial_path_heading(approved['poses'],pos) if approved else pos[2]
-    if math.hypot(pos[0]-target['x'],pos[1]-target['y'])<=POSITION_TOLERANCE:
+    if math.hypot(pos[0]-target['x'],pos[1]-target['y'])<=.25:
      alignment=None;terminal=True
      transition('STOPPING');deadline=min(execution_deadline,now+10);halt_at=now;zero()
-     print('[YAW_PRIORITY] 已在15cm接近范围，跳过路线起步转向；先停稳，再对齐最终朝向。',flush=True)
+     print('[YAW_PRIORITY] 已在25cm终点闭环范围，跳过路线起步转向；先停稳，再对齐最终朝向。',flush=True)
     elif abs(wrap(heading-pos[2]))>.35:
      alignment=begin_alignment(pos,[pos[0],pos[1],heading],now,current_odom(),check_goal_position=False);transition('ALIGN_PATH');align_halt_at=None
      print('[ALIGN_PATH] 先原地对准路线起步方向 %.3frad，速度上限0.30rad/s；计入本次最大运行时间。' % heading,flush=True)
@@ -480,12 +487,12 @@ def main():
    elif state in ('NAVIGATE','ACCEPT'):
     if sdk.get('motion')!='Walk' or sdk.get('motion_pending') is not False: fault('Walk mode lost'); continue
     pos=current_pose()
-    if state=='NAVIGATE' and math.hypot(pos[0]-target['x'],pos[1]-target['y'])<=POSITION_TOLERANCE:
+    if state=='NAVIGATE' and math.hypot(pos[0]-target['x'],pos[1]-target['y'])<=.25:
      zero()
      if goal and not (result and result.done()):goal.cancel_goal_async()
      terminal=bool(result and result.done());alignment=None;raw=None;raw_at=-math.inf
      transition('STOPPING');deadline=min(execution_deadline,now+10);halt_at=now
-     print('[YAW_PRIORITY] 进入15cm接近范围；停止平移并撤销DWB，等待动作结束和停稳后对齐朝向。',flush=True)
+     print('[YAW_PRIORITY] 进入25cm终点闭环范围；停止平移并撤销DWB，等待动作结束和停稳后对齐朝向。',flush=True)
      continue
     if result and result.done():
      terminal=True
@@ -530,6 +537,13 @@ def main():
      print('[GOAL_BOUNDARY_HOLD] '+reason+'；不立即消耗恢复次数，停稳后要求连续1秒新鲜数据复核。',flush=True)
      transition('STOPPING');deadline=min(execution_deadline,now+10);halt_at=now;stop_sequences.clear();settled_review.reset();zero();continue
     if reason:fault(reason);continue
+    if state=='ALIGN_YAW':
+     stamp=pose.header.stamp.sec+pose.header.stamp.nanosec*1e-9
+     wz,decision=yaw_feedback.command(wrap(target['yaw']-current_pose()[2]),odom.twist.twist.angular.z,stamp,now,source_age(pose.header))
+     if now>=next_feedback_log:
+      print('[CLOSED_LOOP_YAW] source_age=%.3fs decision=%s yaw_error=%.4f measured_wz=%.4f output_wz=%.4f' % (source_age(pose.header),decision,wrap(target['yaw']-current_pose()[2]),odom.twist.twist.angular.z,wz),flush=True);next_feedback_log=now+.5
+     if decision=='WAIT_SAMPLE':zero();motion_guard.reset();continue
+     if decision in ('INVALID_SAMPLE','STAMP_REGRESSION'):fault('[FEEDBACK_INVALID] '+decision);continue
     if wz==0.:
      if state=='ALIGN_PATH':
       zero()
@@ -543,6 +557,26 @@ def main():
     if reason:fault('[TURN_CLEARANCE] '+reason);continue
     align_halt_at=None
     output(0.,wz,now)
+   elif state=='TERMINAL_APPROACH':
+    zero_age=source_age(pose.header)
+    stamp=pose.header.stamp.sec+pose.header.stamp.nanosec*1e-9
+    vx,decision=terminal_approach.command(current_pose(),[target['x'],target['y']],odom.twist.twist.linear.x,stamp,now,zero_age)
+    if decision=='ADVANCE':
+     if not costmap_fresh(now):zero();continue
+     op=current_odom();blocked=''
+     # Conservative swept padded-body disk, includes 0.15m/s upper speed and braking.
+     for step in (0.,.05,.10,.15):
+      blocked=rotation_clearance(costmap,(op[0]+step*math.cos(op[2]),op[1]+step*math.sin(op[2])),turn_radius)
+      if blocked:break
+     if blocked:vx=0.;decision='POSITION_BLOCKED:'+blocked
+    if now>=next_feedback_log:
+     print('[CLOSED_LOOP_POSITION] source_age=%.3fs decision=%s distance=%.3fm measured_vx=%.4f output_vx=%.3f' % (zero_age,decision,math.hypot(current_pose()[0]-target['x'],current_pose()[1]-target['y']),odom.twist.twist.linear.x,vx),flush=True);next_feedback_log=now+.5
+    if decision=='WAIT_SAMPLE':zero();motion_guard.reset();continue
+    if decision in ('INVALID_SAMPLE','STAMP_REGRESSION'):fault('[FEEDBACK_INVALID] '+decision);continue
+    if decision=='ADVANCE':output(vx,0.,now)
+    else:
+     zero();transition('STOPPING');deadline=min(execution_deadline,now+10);halt_at=now
+     print('[POSITION_FINISHED] '+decision+'；位置微调结束，转入最终朝向，不重试位置。',flush=True)
    elif state=='STOPPING':
     zero()
     if not terminal and result is not None and result.done():
@@ -554,19 +588,30 @@ def main():
     if not stationary:stop_sequences.clear()
     action=settled_review.update(pos,[target['x'],target['y'],target['yaw']],now,stamp,stationary,sdk.get('state_sequence'),current_odom(),yaw_position_limit if yaw_priority_latched else POSITION_RELEASE)
     if action=='WAIT':continue
+    if not approach_attempted:
+     approach_attempted=True
+     distance=math.hypot(pos[0]-target['x'],pos[1]-target['y'])
+     bearing=wrap(math.atan2(target['y']-pos[1],target['x']-pos[0])-pos[2])
+     if .13<distance<=.30 and abs(bearing)<=.18 and execution_deadline-now>12.:
+      terminal_approach=TerminalApproach(now,pos);motion_guard.reset()
+      transition('TERMINAL_APPROACH');deadline=execution_deadline
+      print('[POSITION_ATTEMPT] 一次有界前进闭环，最多6秒；新定位更新，零或0.10m/s；不可改善则保留时间完成最终朝向。',flush=True);continue
     print('[SETTLED_CHECK] stable=1.0s action=%s distance=%.3fm yaw_error=%.3frad' % (action,math.hypot(pos[0]-target['x'],pos[1]-target['y']),wrap(target['yaw']-pos[2])),flush=True)
     if action=='REPLAN' and yaw_priority_latched:
      fault('[FINAL_POSITION_ENVELOPE] 位置超过35cm；停止而不循环位置恢复。');continue
     if action=='REPLAN':
      reacquire('[STOPPING_POSITION_SHIFT] 停稳且连续1秒新鲜定位确认位置超过0.20m，重新接近目标',now);continue
     if action=='ALIGN_YAW':
+     yaw_attempts+=1
+     if yaw_attempts>4:fault('[YAW_SETTLE_LIMIT] 已进行4次朝向闭环与停稳复核，仍未达到0.10rad');continue
+     yaw_feedback=TerminalYaw()
      if alignment is None:alignment=begin_alignment(pos,[target['x'],target['y'],target['yaw']],now,current_odom())
      print('[ALIGN_YAW] 制动停稳已确认，进入最终朝向调整。',flush=True)
      transition('ALIGN_YAW');deadline=execution_deadline;motion_guard.reset()
      print('[ALIGN_YAW_RESUME] 停稳连续复核位置合格，仅微调朝向，不消耗重新接近次数。',flush=True)
      continue
     # The same stable window already contains two distinct SDK reports.
-    print('[FINAL_ERROR] position_error=%.3fm yaw_error=%.4frad; policy=yaw_priority position_limit=0.35m yaw_limit=0.13rad' % (math.hypot(pos[0]-target['x'],pos[1]-target['y']),wrap(target['yaw']-pos[2])),flush=True)
+    print('[FINAL_ERROR] position_error=%.3fm yaw_error=%.4frad; policy=yaw_priority position_limit=0.35m yaw_limit=0.10rad' % (math.hypot(pos[0]-target['x'],pos[1]-target['y']),wrap(target['yaw']-pos[2])),flush=True)
     if math.hypot(pos[0]-target['x'],pos[1]-target['y'])>POSITION_RELEASE:print('[POSITION_APPROXIMATE] 朝向完成，位置超过20cm；实际误差见FINAL_ERROR。',flush=True)
     transition('DONE')
    elif state=='REACQUIRE_STOP':
@@ -618,10 +663,10 @@ def main():
     print('[REPLAN_READY] 新路线%d点，恢复DWB跟踪；仍受原任务剩余时间约束。' % len(path.poses),flush=True)
     points=[dict(x=p.pose.position.x,y=p.pose.position.y) for p in path.poses]
     heading=initial_path_heading(points,pos)
-    if math.hypot(pos[0]-target['x'],pos[1]-target['y'])<=POSITION_TOLERANCE:
+    if math.hypot(pos[0]-target['x'],pos[1]-target['y'])<=.25:
      alignment=None;terminal=True
      transition('STOPPING');deadline=min(execution_deadline,now+10);halt_at=now;zero()
-     print('[YAW_PRIORITY] 已在15cm接近范围，跳过路线起步转向；先停稳，再对齐最终朝向。',flush=True)
+     print('[YAW_PRIORITY] 已在25cm终点闭环范围，跳过路线起步转向；先停稳，再对齐最终朝向。',flush=True)
     elif abs(wrap(heading-pos[2]))>.35:
      alignment=begin_alignment(pos,[pos[0],pos[1],heading],now,current_odom(),check_goal_position=False)
      transition('ALIGN_PATH');align_halt_at=None

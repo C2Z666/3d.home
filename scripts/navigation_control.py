@@ -15,13 +15,13 @@ ALIGN_PROGRESS_TIMEOUT = 12.0
 
 
 RECOVERABLE_INPUT_PHASES = frozenset(('ACCEPT','NAVIGATE','ALIGN_PATH','ALIGN_YAW',
-    'STOPPING','INPUT_PAUSE','REACQUIRE_STOP','REPLAN'))
+    'STOPPING','TERMINAL_APPROACH','INPUT_PAUSE','REACQUIRE_STOP','REPLAN'))
 
 
 def settled_goal_action(pose, target, position_limit=POSITION_RELEASE):
     if math.hypot(pose[0]-target[0],pose[1]-target[1]) > position_limit:
         return 'REPLAN'
-    return 'ALIGN_YAW' if abs(wrap(target[2]-pose[2])) >= .13 else 'DONE'
+    return 'ALIGN_YAW' if abs(wrap(target[2]-pose[2])) >= .10 else 'DONE'
 
 
 class SettledGoalReview:

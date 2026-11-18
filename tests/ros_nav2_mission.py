@@ -132,7 +132,7 @@ try:
   target_x=3.0 if case=='data_retries' else 3. if case=='runtime_limit' else .02 if case in ('approved_turn','slow_turn','turn_stall','unexpected_reverse','turn_obstacle','tf_transient_turn','turn_inflation','turn_drift') else -.5 if case in ('behind_path','visual_shift_turn','turn_drift_path') else .65 if case=='curved_path' else .55
   target_y=.1 if case=='behind_path' else .6 if case=='curved_path' else 0.
   target_yaw=2.8 if case=='tf_transient_turn' else 2. if case=='terminal_shift' else math.pi if case in ('slow_turn','visual_shift_turn','turn_drift','turn_drift_path') else 1. if case in ('approved_turn','turn_stall','unexpected_reverse','behind_path','turn_obstacle','turn_inflation') else math.pi/2 if case=='curved_path' else 0.
-  runtime=60. if case=='data_retries' else 60. if case in ('visual_shift_turn','terminal_shift','tf_transient_turn','turn_drift','turn_drift_path') else 30. if case in ('behind_path','curved_path','slow_turn','tf_transient','motion_retry') else 10.
+  runtime=60. if case=='data_retries' else 60. if case in ('visual_shift_turn','terminal_shift','tf_transient_turn','turn_drift','turn_drift_path') else 30. if case in ('behind_path','curved_path','slow_turn','tf_transient','motion_retry') else 20. if case in ('approved_path','approved_turn') else 10.
   args=['--live','--x',str(target_x),'--y',str(target_y),'--yaw',str(target_yaw),'--max-runtime',str(runtime)]
   route=R/'work/approved_test.path.json';route.parent.mkdir(exist_ok=True)
   if case=='curved_path':
@@ -192,7 +192,7 @@ try:
    assert bool(casecmd),'Nav2 never forwarded a moving command'
    assert 'DONE: goal reached and stopped' in log,log
    if case=='approved_turn':assert '[YAW_PRIORITY]' in log and '[ALIGN_PATH]' not in log,log
-   if case=='approved_path':assert '[PATH_BRAKE]' in log or ('[YAW_PRIORITY]' in log and '[PATH_RELEASED]' in log),log
+   if case=='approved_path':assert '[POSITION_ATTEMPT]' in log and '[POSITION_FINISHED]' in log and '[PATH_RELEASED]' in log,log
    if case=='visual_shift_turn':assert abs(map_dx)>.12 and '[ALIGN_METRICS]' in log,log
    if case=='data_retries':
     assert log.count('[INPUT_RECOVERED]')>=4,log
