@@ -1,11 +1,11 @@
 {
   "schema": 1,
-  "map_id": "d1_stairs_3d_20261117_160854",
+  "map_id": "d1_hall_100832_hall_clean",
   "sha256": {
-    "assets/output/demo/visual_map.npz": "6e75f660811b7e1557338253ac5f35e2aba13121f9140ac2b48fd3c4dd7263f6",
+    "assets/output/demo/visual_map.npz": "41347ec9587e7804469fb0b7bc07436f785e4d6dd3ae03dafb0ef89788678f0d",
     "config/calibration.yaml": "8aeff98d4fbea764583a87ac57a1943e0ded95ba2ff228595ed924d4b7884d10",
-    "maps/lower.yaml": "e7b11103f9de5ec7b8e9d0d70af0f9977333fa4d463d198b2c9de1a991d84640",
-    "maps/lower.pgm": "b3d5901d9478cfb9adeb735262d9ac5987fb16273d4c2907fd2f578a4d9f432a"
+    "maps/lower.yaml": "5686e32331c2448504c81c4d6ade22884eacd5bf805d19808d0b89b72210b212",
+    "maps/lower.pgm": "2b339e6f30ea5ccc262f1f45948311a235b93fba78f440cccf9f9e5d63110c2d"
   },
-  "entry_provenance": "New 3D database installed; entry must be remeasured and site validation must be repeated."
+  "entry_provenance": "Map version switch; saved entry cleared; visual initialization required."
 }

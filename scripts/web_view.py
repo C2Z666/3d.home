@@ -7,6 +7,7 @@ from urllib.parse import urlparse, parse_qs
 import cv2, numpy as np, yaml
 from scene_registry import load_scenes, scene_bundle, scene_list
 from site_identity import verify
+import map_versions
 
 def yaw(q):
     return math.atan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z))
@@ -54,7 +55,7 @@ def handler(state,maps,camera,references,ros_now,scene_info,default_scene,previe
             self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
         def do_POST(self):
             endpoint=urlparse(self.path).path
-            if endpoint not in ('/preview-plan','/navigation/start','/navigation/stop'):
+            if endpoint not in ('/preview-plan','/navigation/start','/navigation/stop','/map-switch'):
                 return self.send(404,b'Not found','text/plain')
             try:
                 if self.headers.get('Origin') not in (None, 'http://'+self.headers.get('Host',''), 'https://'+self.headers.get('Host','')):
@@ -63,7 +64,11 @@ def handler(state,maps,camera,references,ros_now,scene_info,default_scene,previe
                 if not 0<length<=4096:raise ValueError('无效的请求长度')
                 data=json.loads(self.rfile.read(length))
                 if not isinstance(data,dict):raise ValueError('请求必须是 JSON 对象')
-                if endpoint=='/navigation/start':
+                if endpoint!='/navigation/stop' and map_versions.busy(state.root):raise ValueError('地图正在切换，请稍候')
+                if endpoint=='/map-switch':
+                    if data.get('confirmed') is not True:raise ValueError('需要确认切换地图')
+                    result=map_versions.request(state.root,data.get('version'),navigation,preview)
+                elif endpoint=='/navigation/start':
                     if navigation is None:raise ValueError('导航执行未启用')
                     result=navigation.start(data)
                 elif endpoint=='/navigation/stop':
@@ -86,13 +91,19 @@ def handler(state,maps,camera,references,ros_now,scene_info,default_scene,previe
                 url=urlparse(self.path);q=parse_qs(url.query)
                 scene_name=q.get('scene',[default_scene])[0]
                 if scene_name not in maps: scene_name=default_scene
-                state.select(scene_name,scene_info[scene_name]['map_id'])
+                if url.path=='/map-versions':
+                    data=map_versions.catalog(state.root)
+                    result={'active':data['active'],'versions':[{'name':k,'label':v['label']} for k,v in data['versions'].items()],'switching':map_versions.busy(state.root)}
+                    status=state.root/'work/map_switch_status.json'
+                    if status.exists():result['status']=json.loads(status.read_text())
+                    return self.send(200,json.dumps(result,ensure_ascii=False).encode(),'application/json; charset=utf-8')
                 if url.path=='/navigation':
                     result=navigation.snapshot() if navigation else dict(ok=False,error='导航执行未启用')
                     return self.send(200,json.dumps(result,ensure_ascii=False,allow_nan=False).encode(),'application/json; charset=utf-8')
                 if url.path=='/':return self.send(200,html,'text/html; charset=utf-8')
                 if url.path=='/preview-costmap':
                     try:
+                        if map_versions.busy(state.root):raise ValueError('地图正在切换')
                         if preview is None:raise ValueError('规划预览未启用')
                         result=preview.costmap_view(scene_name,q.get('floor',['lower'])[0])
                         return self.send(200,json.dumps(result,ensure_ascii=False,allow_nan=False).encode(),'application/json; charset=utf-8')
@@ -101,6 +112,9 @@ def handler(state,maps,camera,references,ros_now,scene_info,default_scene,previe
                 if url.path=='/state':
                     data=state.snapshot(time.monotonic(),ros_now())
                     spec=scene_info[scene_name]
+                    if spec['map_id']!=state.map_id or map_versions.busy(state.root):
+                        data.update(pose_current=False,navigation_ready=False,pose=None,trajectory=[],scan=None)
+                    data['map_id']=spec['map_id']
                     data['selected_scene']=scene_name
                     data['active_scene']=next((n for n,v in scene_info.items() if v['map_id']==data.get('localization',{}).get('map_id')),None)
                     data['scenes']=scene_list(state.root)

@@ -3,13 +3,17 @@
   "default": "old",
   "scenes": {
     "old": {
-      "label": "3D home scene (20261117_160854)",
-      "map_id": "d1_stairs_3d_20261117_160854",
+      "label": "楼道大厅（清理版）",
+      "map_id": "d1_hall_100832_hall_clean",
       "visual_map": "assets/output/demo/visual_map.npz",
       "maps": {
         "lower": {
           "yaml": "maps/lower.yaml",
           "image": "maps/lower.pgm"
+        },
+        "upper": {
+          "yaml": "maps/upper.yaml",
+          "image": "maps/upper.pgm"
         }
       },
       "entry": null,

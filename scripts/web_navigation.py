@@ -21,6 +21,8 @@ class NavigationManager:
 
     def start(self,data):
         with self.lock:
+            from map_versions import busy
+            if busy(self.root):raise ValueError('地图正在切换')
             if data.get('confirmed') is not True:raise ValueError('需要明确确认后才能执行导航')
             if self.task and self.task['state'] not in ('SUCCEEDED','CANCELED','FAILED'):raise ValueError('已有导航任务，请先停止或等待结束')
             runtime=data.get('max_runtime',10.)

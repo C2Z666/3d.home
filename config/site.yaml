@@ -1,15 +1,16 @@
-schema_version: 1
-initial_floor: lower
-maps_validated: true
-scan_source_validated: true
 entry: null
-stair:
-  speed: null
-  duration: null
-  termination: bounded_time_not_landing
+entry_map_id: d1_hall_100832_hall_clean
+initial_floor: lower
+map_version: hall_clean
+maps_validated: true
 navigation:
   footprint_source: 'original config/planner.yaml: 0.98 x 0.53 m; verify with current
     Stair posture'
-upper_handoff: manual landing validation required; no automatic floor change
-entry_map_id: d1_stairs_3d_20261117_160854
 operator_review_at: '2026-11-17T21:29:03.606062+08:00'
+scan_source_validated: true
+schema_version: 1
+stair:
+  duration: null
+  speed: null
+  termination: bounded_time_not_landing
+upper_handoff: manual landing validation required; no automatic floor change

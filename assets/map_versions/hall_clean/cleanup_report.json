@@ -1,0 +1,70 @@
+{
+  "source": "output\\map-楼道大厅\\map_white_priority_3d_20261117",
+  "scope": "2D occupancy cleanup only; visual bank, poses, calibration unchanged",
+  "operator_confirmed_flat_ground_polygon_pixels": [
+    [
+      245,
+      396
+    ],
+    [
+      245,
+      350
+    ],
+    [
+      273,
+      323
+    ],
+    [
+      305,
+      303
+    ],
+    [
+      310,
+      309
+    ],
+    [
+      309,
+      328
+    ],
+    [
+      284,
+      352
+    ],
+    [
+      268,
+      374
+    ],
+    [
+      271,
+      396
+    ]
+  ],
+  "maps": {
+    "floor1": {
+      "isolated_removed": 126,
+      "small_unknown_filled": 469,
+      "confirmed_roi_changed": 674,
+      "changed_cells": 1196,
+      "resolution": 0.05,
+      "shape": [
+        745,
+        570
+      ],
+      "source_sha256": "efc37d835aa76be78ce81bbfd05b26c54bda4c04d5ee0affdcff70454450ff9b",
+      "output_sha256": "2b339e6f30ea5ccc262f1f45948311a235b93fba78f440cccf9f9e5d63110c2d"
+    },
+    "floor2_platform": {
+      "isolated_removed": 1,
+      "small_unknown_filled": 11,
+      "confirmed_roi_changed": 0,
+      "changed_cells": 12,
+      "resolution": 0.05,
+      "shape": [
+        419,
+        229
+      ],
+      "source_sha256": "488a1df77695f8acc7238c3b3e9af11d1e944182347191b798195e3d1e0dc0ff",
+      "output_sha256": "388085ae110bffe3d8e75ac80ee47971bb1fb42910cd741c9cbc84691c0c46f2"
+    }
+  }
+}
