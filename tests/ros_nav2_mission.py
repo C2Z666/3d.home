@@ -191,7 +191,8 @@ try:
    assert math.hypot(x+map_dx-target_x,y-target_y)<.20 and abs(math.atan2(math.sin(yaw-target_yaw),math.cos(yaw-target_yaw)))<.13,(x,y,yaw,log)
    assert bool(casecmd),'Nav2 never forwarded a moving command'
    assert 'DONE: goal reached and stopped' in log,log
-   if case in ('approved_path','approved_turn'):assert '[PATH]' in log and '[ACCEPTED]' in log and '[STOPPING]' in log,log
+   if case=='approved_turn':assert '[YAW_PRIORITY]' in log and '[ALIGN_PATH]' not in log,log
+   if case=='approved_path':assert '[PATH_BRAKE]' in log or ('[YAW_PRIORITY]' in log and '[PATH_RELEASED]' in log),log
    if case=='visual_shift_turn':assert abs(map_dx)>.12 and '[ALIGN_METRICS]' in log,log
    if case=='data_retries':
     assert log.count('[INPUT_RECOVERED]')>=4,log

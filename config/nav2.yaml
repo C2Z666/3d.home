@@ -13,7 +13,7 @@ planner_server:
     - GridBased
     GridBased:
       plugin: nav2_navfn_planner/NavfnPlanner
-      tolerance: 0.1
+      tolerance: 0.05
       use_astar: true
       allow_unknown: false
 controller_server:

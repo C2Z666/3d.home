@@ -28,18 +28,25 @@ class SettledGoalReview:
     """Classify only continuously stopped, fresh samples; no wider arrival tolerance."""
     def __init__(self):self.reset()
     def reset(self):
-        self.action=None;self.since=None;self.stamp=None;self.samples=0
-    def update(self, pose, target, now, stamp, is_stopped):
+        self.action=None;self.since=None;self.stamp=None;self.samples=0;self.sdk_sequences=set();self.odom_anchor=None
+    def update(self, pose, target, now, stamp, is_stopped, sdk_sequence=None, odom_pose=None):
         if not is_stopped:
             self.reset();return 'WAIT'
         if stamp==self.stamp:return 'WAIT'
         self.stamp=stamp
         action=settled_goal_action(pose,target)
+        if odom_pose is not None and self.odom_anchor is not None:
+            if math.hypot(odom_pose[0]-self.odom_anchor[0],odom_pose[1]-self.odom_anchor[1])>.02 or abs(wrap(odom_pose[2]-self.odom_anchor[2]))>.03:
+                self.reset()
         if action!=self.action:
             self.action=action;self.since=now;self.samples=1
+            self.sdk_sequences=set();self.odom_anchor=odom_pose
+            if sdk_sequence is not None:self.sdk_sequences.add(sdk_sequence)
             return 'WAIT'
+        if sdk_sequence is not None:self.sdk_sequences.add(sdk_sequence)
         self.samples+=1
-        return action if self.samples>=2 and now-self.since>=1. else 'WAIT'
+        sdk_ok=sdk_sequence is None or len(self.sdk_sequences)>=2
+        return action if self.samples>=2 and now-self.since>=1. and sdk_ok else 'WAIT'
 
 
 def replan_errors(start, end, current, target, endpoint_tolerance):

@@ -147,7 +147,7 @@ def main():
    raw_fastlio=raw_lio,correction=loc.get('correction'),localization_mode=loc.get('mode'),tracking_fault=loc.get('tracking_fault'),
    commands=dict(dwb=None if raw_controller is None else [raw_controller.linear.x,raw_controller.angular.z],smoothed=None if raw is None else [raw.linear.x,raw.angular.z],supervised=list(last_sent),bridge_actual=None),
    measured=None if t is None else [t.linear.x,t.linear.y,t.angular.z],
-   sdk={k:sdk.get(k) for k in ('state_sequence','state_age_sec','reported_forward_speed','reported_lateral_speed','reported_yaw_rate','command_zero','motion')},
+   sdk={k:sdk.get(k) for k in ('state_sequence','state_age_sec','reported_forward_speed','reported_lateral_speed','reported_yaw_rate','command_zero','motion','bridge_target','bridge_ramped','sdk_move_normalized_lr_fb_yaw','move_sequence','move_age_sec','cmd_age_sec','move_write_ok','move_write_failed','speed_level','limits_vx_wz_ax_aw')},
    receive_age={k:age(now,v) for k,v in dict(localization=loc_at,pose=pose_at,scan=scan_at,odom=odom_at,scan_health=health_at,sdk=sdk_at,dwb=controller_at,smoothed=raw_at,raw_fastlio=raw_lio_at).items()},
    source_age=dict(scan=None if scan_stamp is None else n.get_clock().now().nanoseconds/1e9-scan_stamp,raw_fastlio=None if raw_lio is None else n.get_clock().now().nanoseconds/1e9-raw_lio['stamp'],pose=source_age(pose.header) if pose else None,odom=source_age(odom.header) if odom else None,localization=None if loc.get('source_stamp') is None else n.get_clock().now().nanoseconds/1e9-loc['source_stamp']),
    scan_health=scanhealth,tf=transform_snapshot(),tf_reason=tf_reason(),diagnostic_error=trace.error)
@@ -464,12 +464,24 @@ def main():
     execution_started=now; execution_deadline=now+args.max_runtime; next_countdown=now+5; deadline=execution_deadline
     print('[START] Walk 已稳定确认%s；最大运行时间 %.1fs，剩余 %.1fs；到时自动终止并停止速度发布。' % ('，未重复发送 standup' if walk_gate.request_before is None else '',args.max_runtime,args.max_runtime),flush=True)
     pos=current_pose();heading=initial_path_heading(approved['poses'],pos) if approved else pos[2]
-    if abs(wrap(heading-pos[2]))>.35:
+    if math.hypot(pos[0]-target['x'],pos[1]-target['y'])<=POSITION_TOLERANCE:
+     alignment=None;terminal=True
+     transition('STOPPING');deadline=min(execution_deadline,now+10);halt_at=now;zero()
+     print('[YAW_PRIORITY] 已在15cm接近范围，跳过路线起步转向；先停稳，再对齐最终朝向。',flush=True)
+    elif abs(wrap(heading-pos[2]))>.35:
      alignment=begin_alignment(pos,[pos[0],pos[1],heading],now,current_odom(),check_goal_position=False);transition('ALIGN_PATH');align_halt_at=None
      print('[ALIGN_PATH] 先原地对准路线起步方向 %.3frad，速度上限0.30rad/s；计入本次最大运行时间。' % heading,flush=True)
     else:submit_route()
    elif state in ('NAVIGATE','ACCEPT'):
     if sdk.get('motion')!='Walk' or sdk.get('motion_pending') is not False: fault('Walk mode lost'); continue
+    pos=current_pose()
+    if state=='NAVIGATE' and math.hypot(pos[0]-target['x'],pos[1]-target['y'])<=POSITION_TOLERANCE:
+     zero()
+     if goal and not (result and result.done()):goal.cancel_goal_async()
+     terminal=bool(result and result.done());alignment=None;raw=None;raw_at=-math.inf
+     transition('STOPPING');deadline=min(execution_deadline,now+10);halt_at=now
+     print('[YAW_PRIORITY] 进入15cm接近范围；停止平移并撤销DWB，等待动作结束和停稳后对齐朝向。',flush=True)
+     continue
     if result and result.done():
      terminal=True
      if result.result().status!=GoalStatus.STATUS_SUCCEEDED:
@@ -478,9 +490,9 @@ def main():
      pos=current_pose()
      if math.hypot(pos[0]-target['x'],pos[1]-target['y'])>POSITION_RELEASE:
       reacquire('[POSITION_NOT_REACHED] DWB报告到达，但融合定位终点距离未通过复核',now);continue
-     alignment=begin_alignment(pos,[target['x'],target['y'],target['yaw']],now,current_odom())
-     transition('ALIGN_YAW');zero()
-     print('[ALIGN_YAW] 路径跟踪已结束；位置已到达，开始独立终点朝向控制，转向上限0.30rad/s，12秒无朝向进展则停止。',flush=True)
+     alignment=None
+     transition('STOPPING');deadline=min(execution_deadline,now+10);halt_at=now;zero()
+     print('[PATH_BRAKE] 路径跟踪结束；先在零指令下确认停稳，再独立调整最终朝向。',flush=True)
      continue
     if state=='NAVIGATE' and raw is not None and now-raw_at<.15:
      values=(raw.linear.x,raw.linear.y,raw.linear.z,raw.angular.x,raw.angular.y,raw.angular.z)
@@ -498,6 +510,10 @@ def main():
       if now-command_missing_at>allowance:fault('[COMMAND_STREAM_LOST] DWB/速度平滑器持续%.1f秒没有新鲜输出；raw_age=%.2fs smoothed_age=%.2fs' % (allowance,now-controller_at,now-raw_at))
    elif state in ('ALIGN_PATH','ALIGN_YAW'):
     if sdk.get('motion')!='Walk' or sdk.get('motion_pending') is not False: fault('Walk mode lost'); continue
+    if state=='ALIGN_YAW' and at_target():
+     transition('STOPPING');deadline=min(execution_deadline,now+10);halt_at=now;zero()
+     print('[FINAL_POSE_ACCEPTABLE] 位置和朝向已在最终验收范围；直接停车复核，不追加转向。',flush=True)
+     continue
     wz,reason=alignment.command(current_pose(),now,current_odom(),odom.twist.twist.angular.z)
     if reason.startswith('[ALIGN_ODOM_DRIFT]'):reacquire(reason,now);continue
     if reason.startswith('[ALIGN_GOAL_SHIFT]') and state=='ALIGN_YAW':
@@ -519,22 +535,26 @@ def main():
     output(0.,wz,now)
    elif state=='STOPPING':
     zero()
+    if not terminal and result is not None and result.done():
+     terminal=True
+     print('[PATH_RELEASED] 旧路径动作已结束；零速停稳复核后才允许最终转向。',flush=True)
     if not terminal or now-halt_at<.7:continue
     pos=current_pose();stamp=(pose.header.stamp.sec,pose.header.stamp.nanosec)
     stationary=stopped()
     if not stationary:stop_sequences.clear()
-    action=settled_review.update(pos,[target['x'],target['y'],target['yaw']],now,stamp,stationary)
+    action=settled_review.update(pos,[target['x'],target['y'],target['yaw']],now,stamp,stationary,sdk.get('state_sequence'),current_odom())
     if action=='WAIT':continue
     print('[SETTLED_CHECK] stable=1.0s action=%s distance=%.3fm yaw_error=%.3frad' % (action,math.hypot(pos[0]-target['x'],pos[1]-target['y']),wrap(target['yaw']-pos[2])),flush=True)
     if action=='REPLAN':
      reacquire('[STOPPING_POSITION_SHIFT] 停稳且连续1秒新鲜定位确认位置超过0.20m，重新接近目标',now);continue
     if action=='ALIGN_YAW':
+     if alignment is None:alignment=begin_alignment(pos,[target['x'],target['y'],target['yaw']],now,current_odom())
+     print('[ALIGN_YAW] 制动停稳已确认，进入最终朝向调整。',flush=True)
      transition('ALIGN_YAW');deadline=execution_deadline;motion_guard.reset()
      print('[ALIGN_YAW_RESUME] 停稳连续复核位置合格，仅微调朝向，不消耗重新接近次数。',flush=True)
      continue
-    # Stable stopped samples plus two distinct SDK status messages are required.
-    stop_sequences.add(sdk.get('state_sequence'))
-    if len(stop_sequences)<2:continue
+    # The same stable window already contains two distinct SDK reports.
+    print('[FINAL_ERROR] position_error=%.3fm yaw_error=%.4frad; policy=yaw_priority position_limit=0.20m yaw_limit=0.13rad' % (math.hypot(pos[0]-target['x'],pos[1]-target['y']),wrap(target['yaw']-pos[2])),flush=True)
     transition('DONE')
    elif state=='REACQUIRE_STOP':
     zero()
@@ -585,7 +605,11 @@ def main():
     print('[REPLAN_READY] 新路线%d点，恢复DWB跟踪；仍受原任务剩余时间约束。' % len(path.poses),flush=True)
     points=[dict(x=p.pose.position.x,y=p.pose.position.y) for p in path.poses]
     heading=initial_path_heading(points,pos)
-    if abs(wrap(heading-pos[2]))>.35:
+    if math.hypot(pos[0]-target['x'],pos[1]-target['y'])<=POSITION_TOLERANCE:
+     alignment=None;terminal=True
+     transition('STOPPING');deadline=min(execution_deadline,now+10);halt_at=now;zero()
+     print('[YAW_PRIORITY] 已在15cm接近范围，跳过路线起步转向；先停稳，再对齐最终朝向。',flush=True)
+    elif abs(wrap(heading-pos[2]))>.35:
      alignment=begin_alignment(pos,[pos[0],pos[1],heading],now,current_odom(),check_goal_position=False)
      transition('ALIGN_PATH');align_halt_at=None
      print('[ALIGN_PATH] 重规划后对准新路线起步方向 %.3frad。' % heading,flush=True)

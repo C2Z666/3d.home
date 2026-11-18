@@ -678,6 +678,21 @@ private:
                 << ((target_.linear.x == 0.0 && target_.linear.y == 0.0 && target_.angular.z == 0.0 &&
                   current_.linear.x == 0.0 && current_.linear.y == 0.0 && current_.angular.z == 0.0) ? "true" : "false")
                 << "}";
+    // Commands are transport requests, not measured robot motion.
+    auto payload = status_json.str();
+    payload.pop_back();
+    status_json.str(""); status_json.clear();
+    status_json << payload
+      << ",\"bridge_target\":[" << target_.linear.x << "," << target_.linear.y << "," << target_.angular.z << "]"
+      << ",\"bridge_ramped\":[" << current_.linear.x << "," << current_.linear.y << "," << current_.angular.z << "]"
+      << ",\"sdk_move_normalized_lr_fb_yaw\":[" << sdk_lr_ << "," << sdk_fb_ << "," << sdk_yaw_ << "]"
+      << ",\"move_sequence\":" << move_sequence_
+      << ",\"move_age_sec\":" << (have_sdk_move_ ? Age(last_sdk_move_) : -1.0)
+      << ",\"cmd_age_sec\":" << (have_cmd_ ? Age(last_cmd_) : -1.0)
+      << ",\"move_write_ok\":" << events_->move_write_ok.load()
+      << ",\"move_write_failed\":" << events_->move_write_failed.load()
+      << ",\"speed_level\":" << speed_level_
+      << ",\"limits_vx_wz_ax_aw\":[" << max_lin_vel_ << "," << max_ang_vel_ << "," << max_lin_accel_ << "," << max_ang_accel_ << "]}";
     std_msgs::msg::String status;
     status.data = status_json.str();
     status_pub_->publish(status);

@@ -11,3 +11,4 @@ obstacle_min_above_floor_m: 0.12
 obstacle_max_above_floor_m: 1.2
 range_min_m: 0.3
 range_max_m: 8.0
+floor_edge_support_filter: true

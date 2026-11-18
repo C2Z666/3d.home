@@ -15,11 +15,21 @@ def cloud_xyz(m):
  a=np.ndarray((m.height,m.width),dtype=dtype,buffer=m.data,strides=(m.row_step,m.point_step))
  return np.stack([a[k].reshape(-1) for k in ('x','y','z')],axis=1)
 
-def project(points,N_L,cfg):
+def project(points,N_L,cfg,diagnostic=None):
  p=transform(N_L,points);d=np.linalg.norm(p[:,:2],axis=1)
  keep=np.isfinite(p).all(axis=1)&(d>=cfg['range_min_m'])&(d<=cfg['range_max_m'])
  lo=cfg['obstacle_min_above_floor_m']-cfg['base_height_m'];hi=cfg['obstacle_max_above_floor_m']-cfg['base_height_m']
  keep&=(p[:,2]>=lo)&(p[:,2]<=hi);p=p[keep];d=d[keep]
+ # Reject isolated returns only in the lowest 3 cm of the obstacle band.
+ # Higher points and supported small obstacles retain the original semantics.
+ rejected=0
+ if len(p) and cfg.get('floor_edge_support_filter',False):
+  from scipy.spatial import cKDTree
+  near_floor=p[:,2]<lo+.03
+  distances,_=cKDTree(p).query(p,k=3,distance_upper_bound=.08)
+  supported=np.isfinite(distances[:,2])
+  retain=~near_floor|supported;rejected=int((~retain).sum());p=p[retain];d=d[retain]
+ if diagnostic is not None:diagnostic.update(floor_edge_rejected=rejected,obstacle_points=len(p))
  bins=np.floor((np.arctan2(p[:,1],p[:,0])+math.pi)/(2*math.pi/720)).astype(int)%720
  out=np.full(720,np.inf);np.minimum.at(out,bins,d)
  return out
@@ -36,7 +46,7 @@ def main():
  from sensor_msgs.msg import PointCloud2,LaserScan
  from std_msgs.msg import String
  rclpy.init();n=rclpy.create_node('d1_cloud_scan');history=collections.deque(maxlen=100);pending=None
- last=-math.inf;fault='waiting for calibrated cloud and odometry';points=0
+ last=-math.inf;fault='waiting for calibrated cloud and odometry';points=0;projection_info={}
  pub=n.create_publisher(LaserScan,'/d1/nav/scan',qos_profile_sensor_data);health=n.create_publisher(String,'/d1/nav/scan_status',1)
  def stamp(h):return h.stamp.sec+h.stamp.nanosec*1e-9
  def odom(m):
@@ -66,13 +76,20 @@ def main():
      xyz=cloud_xyz(m);points=int(np.isfinite(xyz).all(axis=1).sum())
      if points<30:raise ValueError('too few finite raw points')
      # Keep the raw LiDAR axes and apply the calibrated base<-LiDAR extrinsic.
-     ranges=project(xyz,N_B@B_L,c)
+     ranges=project(xyz,N_B@B_L,c,projection_info)
+     # Bounded paired evidence at exactly the cloud acquisition time.
+     body_points=transform(N_B@B_L,xyz)
+     selected=body_points[np.isfinite(body_points).all(axis=1)&(body_points[:,0]>.3)&(body_points[:,0]<2.)&(np.abs(body_points[:,1])<.6)]
+     selected=selected[(selected[:,2]>-.6)&(selected[:,2]<.3)]
+     sample=selected[::max(1,len(selected)//24)][:24]
+     paired=transform(planar(W_B),sample)
+     projection_info.update(source_stamp=t,near_front_count=len(selected),near_front_base=sample.round(4).tolist(),near_front_odom=paired.round(4).tolist(),assumed_base_height_m=c['base_height_m'])
      out=LaserScan();out.header.stamp=m.header.stamp;out.header.frame_id='nav_base'
      out.angle_min=-math.pi;out.angle_increment=2*math.pi/720;out.angle_max=math.pi-out.angle_increment
      out.range_min=float(c['range_min_m']);out.range_max=float(c['range_max_m']);out.ranges=ranges.tolist();pub.publish(out)
      last=time.monotonic();fault=''
     except Exception as e:fault=str(e)
-  health.publish(String(data=json.dumps(dict(ready=time.monotonic()-last<.4,reason=fault,finite_input_points=points))))
+  health.publish(String(data=json.dumps(dict(ready=time.monotonic()-last<.4,reason=fault,finite_input_points=points,**projection_info))))
  n.create_subscription(Odometry,c['odom_topic'],odom,qos_profile_sensor_data);n.create_subscription(PointCloud2,c['cloud_topic'],cloud,qos_profile_sensor_data);n.create_timer(.04,tick)
  try:rclpy.spin(n)
  except KeyboardInterrupt:pass
