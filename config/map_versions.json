@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "active": "classroom",
+  "active": "hall_clean",
   "versions": {
     "classroom": {
       "label": "教室",

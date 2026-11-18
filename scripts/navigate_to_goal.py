@@ -7,7 +7,7 @@ from mission_runtime import RecoveryBudget, MissionTrace
 from terminal_feedback import TerminalApproach, TerminalYaw
 from navigation_control import HeadingAlignment, MotionGuard, rotation_clearance, quaternion_yaw, wrap, initial_path_heading, scan_input_state, POSITION_TOLERANCE, POSITION_RELEASE, replan_errors, settled_goal_action, SettledGoalReview, RECOVERABLE_INPUT_PHASES
 
-MAX_LINEAR_SPEED = 0.15
+MAX_LINEAR_SPEED = 0.30
 MAX_ANGULAR_SPEED = 0.4
 
 
@@ -533,8 +533,6 @@ def main():
      if state=='ALIGN_YAW':fault('[FINAL_ALIGNMENT_DRIFT] '+reason)
      else:reacquire(reason,now)
      continue
-    if reason.startswith('[ALIGN_GOAL_SHIFT]') and state=='ALIGN_YAW' and yaw_priority_latched:
-     fault('[FINAL_POSITION_ENVELOPE] '+reason);continue
     if reason.startswith('[ALIGN_GOAL_SHIFT]') and state=='ALIGN_YAW':
      print('[GOAL_BOUNDARY_HOLD] '+reason+'；不立即消耗恢复次数，停稳后要求连续1秒新鲜数据复核。',flush=True)
      transition('STOPPING');deadline=min(execution_deadline,now+10);halt_at=now;stop_sequences.clear();settled_review.reset();zero();continue

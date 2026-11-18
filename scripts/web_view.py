@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Map viewer with planning preview and explicitly confirmed supervised navigation."""
-import argparse, collections, io, json, math, os, threading, time
+import argparse, collections, io, json, math, os, threading, time, gzip
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
@@ -51,8 +51,20 @@ def handler(state,maps,camera,references,ros_now,scene_info,default_scene,previe
     class Handler(BaseHTTPRequestHandler):
         def log_message(self,*args):pass
         def send(self,code,body,kind):
-            self.send_response(code);self.send_header('Content-Type',kind);self.send_header('Cache-Control','no-store')
-            self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
+            encodings = [part.strip().split(';') for part in self.headers.get('Accept-Encoding', '').lower().split(',')]
+            accepts_gzip = any(parts[0] == 'gzip' and not any(p.strip() in ('q=0', 'q=0.0') for p in parts[1:]) for parts in encodings)
+            compressed = accepts_gzip and len(body) > 1024 and (kind.startswith('application/json') or kind.startswith('text/'))
+            if compressed:
+                body = gzip.compress(body, compresslevel=1)
+            self.send_response(code)
+            self.send_header('Content-Type',kind)
+            self.send_header('Cache-Control','no-store')
+            self.send_header('Vary','Accept-Encoding')
+            if compressed:
+                self.send_header('Content-Encoding','gzip')
+            self.send_header('Content-Length',str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         def do_POST(self):
             endpoint=urlparse(self.path).path
             if endpoint not in ('/preview-plan','/navigation/start','/navigation/stop','/map-switch'):
@@ -132,7 +144,9 @@ def handler(state,maps,camera,references,ros_now,scene_info,default_scene,previe
                     floor=q.get('floor',['lower'])[0]
                     return self.send(200,maps[scene_name][floor][1],'image/png')
                 if url.path=='/camera.jpg':
-                    with state.lock: value=camera.get('image');at=camera.get('at',-math.inf);stamp=camera.get('stamp',-math.inf)
+                    with state.lock:
+                        camera['requested_at']=time.monotonic()
+                        value=camera.get('image');at=camera.get('at',-math.inf);stamp=camera.get('stamp',-math.inf)
                     if value is not None and time.monotonic()-at<1.5 and -.1<=ros_now()-stamp<1.5:return self.send(200,value,'image/jpeg')
                     return self.send(404,b'No fresh image','text/plain')
                 if url.path=='/reference.jpg':
@@ -193,6 +207,9 @@ def main():
         if m.header.frame_id=='map':state.put('plan',[[v.pose.position.x,v.pose.position.y] for v in m.poses],stamp(m.header))
     def image(m):
         now=time.monotonic()
+        with state.lock:
+            requested_at=camera.get('requested_at',-math.inf)
+        if now-requested_at>3:return
         if now-camera.get('at',-math.inf)<.5:return
         if (m.encoding not in ('rgb8','bgr8') or (m.width,m.height)!=(1920,1080) or
             m.step<m.width*3 or len(m.data)<m.step*m.height or not -.1<=clock()-stamp(m.header)<1):return
