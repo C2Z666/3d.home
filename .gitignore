@@ -44,3 +44,6 @@ __pycache__/
 Thumbs.db
 *.swo
 *.exit
+
+# Runtime files created by older misplaced shutdown script
+scripts/work/
