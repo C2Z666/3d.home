@@ -18,8 +18,8 @@ RECOVERABLE_INPUT_PHASES = frozenset(('ACCEPT','NAVIGATE','ALIGN_PATH','ALIGN_YA
     'STOPPING','INPUT_PAUSE','REACQUIRE_STOP','REPLAN'))
 
 
-def settled_goal_action(pose, target):
-    if math.hypot(pose[0]-target[0],pose[1]-target[1]) > POSITION_RELEASE:
+def settled_goal_action(pose, target, position_limit=POSITION_RELEASE):
+    if math.hypot(pose[0]-target[0],pose[1]-target[1]) > position_limit:
         return 'REPLAN'
     return 'ALIGN_YAW' if abs(wrap(target[2]-pose[2])) >= .13 else 'DONE'
 
@@ -29,12 +29,12 @@ class SettledGoalReview:
     def __init__(self):self.reset()
     def reset(self):
         self.action=None;self.since=None;self.stamp=None;self.samples=0;self.sdk_sequences=set();self.odom_anchor=None
-    def update(self, pose, target, now, stamp, is_stopped, sdk_sequence=None, odom_pose=None):
+    def update(self, pose, target, now, stamp, is_stopped, sdk_sequence=None, odom_pose=None, position_limit=POSITION_RELEASE):
         if not is_stopped:
             self.reset();return 'WAIT'
         if stamp==self.stamp:return 'WAIT'
         self.stamp=stamp
-        action=settled_goal_action(pose,target)
+        action=settled_goal_action(pose,target,position_limit)
         if odom_pose is not None and self.odom_anchor is not None:
             if math.hypot(odom_pose[0]-self.odom_anchor[0],odom_pose[1]-self.odom_anchor[1])>.02 or abs(wrap(odom_pose[2]-self.odom_anchor[2]))>.03:
                 self.reset()
@@ -96,13 +96,14 @@ def initial_path_heading(points, pose):
 
 
 class HeadingAlignment:
-    def __init__(self, pose, target, now, odom_pose, check_goal_position=True):
+    def __init__(self, pose, target, now, odom_pose, check_goal_position=True, position_limit=POSITION_RELEASE):
         self.target = target
         self.started = self.progress_at = now
         self.best_angle = abs(wrap(target[2]-pose[2]))
         self.anchor = pose[:]
         self.odom_anchor = odom_pose[:]
         self.check_goal_position = check_goal_position
+        self.position_limit = position_limit
 
     def diagnostics(self, pose, odom_pose):
         dx,dy = odom_pose[0]-self.odom_anchor[0],odom_pose[1]-self.odom_anchor[1]
@@ -119,8 +120,8 @@ class HeadingAlignment:
         details = ' odom_drift=%.3fm map_alignment_shift=%.3fm goal_distance=%.3fm' % tuple(stats.values())
         if stats['odom_drift_m'] > .12:
             return 0., '[ALIGN_ODOM_DRIFT] 转向期间FAST-LIO机身位移超过0.12m，停车复核并重新规划；'+details
-        if self.check_goal_position and stats['goal_distance_m'] > POSITION_RELEASE:
-            return 0., '[ALIGN_GOAL_SHIFT] 地图中终点距离超过%.2fm，先保持零速并连续复核；' % POSITION_RELEASE+details
+        if self.check_goal_position and stats['goal_distance_m'] > self.position_limit:
+            return 0., '[ALIGN_GOAL_SHIFT] 地图中终点距离超过%.2fm，先保持零速并连续复核；' % self.position_limit+details
         if now-self.started >= ALIGN_TIMEOUT:
             return 0., '[ALIGN_TIMEOUT] 终点朝向调整超过45秒'
         if abs(error) <= self.best_angle-.05:

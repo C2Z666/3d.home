@@ -188,7 +188,7 @@ try:
    assert not any(v[1]>cancel_at+.3 for v in casecmd),casecmd
   else:
    assert process.returncode==0,(log,x,y,raw_count,len(casecmd),actions)
-   assert math.hypot(x+map_dx-target_x,y-target_y)<.20 and abs(math.atan2(math.sin(yaw-target_yaw),math.cos(yaw-target_yaw)))<.13,(x,y,yaw,log)
+   assert math.hypot(x+map_dx-target_x,y-target_y)<(.35 if case=='terminal_shift' else .20) and abs(math.atan2(math.sin(yaw-target_yaw),math.cos(yaw-target_yaw)))<.13,(x,y,yaw,log)
    assert bool(casecmd),'Nav2 never forwarded a moving command'
    assert 'DONE: goal reached and stopped' in log,log
    if case=='approved_turn':assert '[YAW_PRIORITY]' in log and '[ALIGN_PATH]' not in log,log
@@ -198,7 +198,7 @@ try:
     assert log.count('[INPUT_RECOVERED]')>=4,log
     assert '[POSITION_RECOVERY_LIMIT]' not in log and '[MOTION_RECOVERY_LIMIT]' not in log,log
    if case=='motion_retry':assert '[NO_MOTION_RESPONSE]' in log and '[INPUT_RECOVERED]' in log and '[REPLAN_READY]' in log,log
-   if case=='terminal_shift':assert '[REACQUIRE_STOP]' in log and '[REPLAN_READY]' in log,log
+   if case=='terminal_shift':assert '[REACQUIRE_STOP]' not in log and '[POSITION_APPROXIMATE]' in log,log
    if case in ('turn_drift','turn_drift_path'):assert '[ALIGN_ODOM_DRIFT]' in log and '[REACQUIRE_STOP]' in log and '[REPLAN_READY]' in log,log
    if case=='turn_inflation':
     checks=[json.loads(line.split('[TURN_CHECK] ',1)[1]) for line in log.splitlines() if '[TURN_CHECK] ' in line]

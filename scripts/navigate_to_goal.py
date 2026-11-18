@@ -98,6 +98,7 @@ def main():
  sdk={}; loc={}; pose=None; raw=None; odom=None
  sdk_at=loc_at=pose_at=raw_at=odom_at=scan_at=-math.inf
  sdk_identity=None; loc_identity=None; walk_gate=WalkGate()
+ yaw_priority_latched=False; yaw_position_limit=.35
  execution_started=None; execution_deadline=None; next_countdown=None; runtime_expired=False
  state='WAIT'; deadline=time.monotonic()+60; goal=None; result=None; terminal=False; failed=''; stop_sequences=set(); halt_at=None
  scan_stamp=None;scanhealth={}; health_at=-math.inf; next_wait_log=0.
@@ -111,10 +112,11 @@ def main():
  budget=RecoveryBudget();pause_category='data';next_sample=0.;last_sent=(0.,0.);raw_lio=None;raw_lio_at=-math.inf
  task_id=args.path_file.name.removesuffix('.path.json') if args.path_file else 'cli-'+str(os.getpid())
  trace=MissionTrace(root/'work/navigation',task_id)
- trace.emit('mission',goal=target,scene=args.scene,map_id=map_id,max_runtime=args.max_runtime,source_hashes={name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in ('scripts/navigate_to_goal.py','scripts/mission_runtime.py','config/calibration.yaml','config/nav2.yaml')},unavailable_fields=['bridge_actual_command'])
+ trace.emit('mission',goal=target,scene=args.scene,map_id=map_id,max_runtime=args.max_runtime,source_hashes={name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in ('scripts/navigate_to_goal.py','scripts/mission_runtime.py','config/calibration.yaml','config/nav2.yaml')},bridge_actual_semantics='normalized SDK Move request; transport counters do not prove physical execution')
  def transition(next_state,reason=''):
-  nonlocal state,raw,raw_at,command_missing_at,first_command_seen
+  nonlocal state,raw,raw_at,command_missing_at,first_command_seen,yaw_priority_latched
   old=state
+  if next_state=='STOPPING' and old in ('WAIT','REPLAN','NAVIGATE','ACCEPT'):yaw_priority_latched=True
   if old==next_state:return
   if next_state in ('FAULT','INPUT_PAUSE','REACQUIRE_STOP','REPLAN','STOPPING','DONE','ACCEPT'):
    zero();raw=None;raw_at=-math.inf
@@ -128,6 +130,7 @@ def main():
   event=dict(previous=old,state=state,reason=reason,recovery=budget.snapshot(time.monotonic()))
   trace.emit('transition',**event);print('[NAV_EVENT] '+json.dumps(dict(task_id=task_id,**event),ensure_ascii=False),flush=True)
  def begin_alignment(*a,**kw):
+  if kw.get('check_goal_position',True):kw['position_limit']=yaw_position_limit if yaw_priority_latched else POSITION_RELEASE
   motion_guard.reset();return HeadingAlignment(*a,**kw)
  def source_age(header):
   return n.get_clock().now().nanoseconds/1e9-header.stamp.sec-header.stamp.nanosec*1e-9
@@ -145,7 +148,7 @@ def main():
   trace.sample(state=state,recovery=budget.snapshot(now),goal=target,
    map_pose=current_pose() if pose else None,odom_pose=current_odom() if odom else None,
    raw_fastlio=raw_lio,correction=loc.get('correction'),localization_mode=loc.get('mode'),tracking_fault=loc.get('tracking_fault'),
-   commands=dict(dwb=None if raw_controller is None else [raw_controller.linear.x,raw_controller.angular.z],smoothed=None if raw is None else [raw.linear.x,raw.angular.z],supervised=list(last_sent),bridge_actual=None),
+   commands=dict(dwb=None if raw_controller is None else [raw_controller.linear.x,raw_controller.angular.z],smoothed=None if raw is None else [raw.linear.x,raw.angular.z],supervised=list(last_sent),bridge_actual=None if sdk.get('sdk_move_normalized_lr_fb_yaw') is None else dict(normalized_lr_fb_yaw=sdk['sdk_move_normalized_lr_fb_yaw'],sequence=sdk.get('move_sequence'),age_sec=sdk.get('move_age_sec'),write_ok=sdk.get('move_write_ok'),write_failed=sdk.get('move_write_failed'))),
    measured=None if t is None else [t.linear.x,t.linear.y,t.angular.z],
    sdk={k:sdk.get(k) for k in ('state_sequence','state_age_sec','reported_forward_speed','reported_lateral_speed','reported_yaw_rate','command_zero','motion','bridge_target','bridge_ramped','sdk_move_normalized_lr_fb_yaw','move_sequence','move_age_sec','cmd_age_sec','move_write_ok','move_write_failed','speed_level','limits_vx_wz_ax_aw')},
    receive_age={k:age(now,v) for k,v in dict(localization=loc_at,pose=pose_at,scan=scan_at,odom=odom_at,scan_health=health_at,sdk=sdk_at,dwb=controller_at,smoothed=raw_at,raw_fastlio=raw_lio_at).items()},
@@ -270,7 +273,7 @@ def main():
  def at_target():
   q=pose.pose.orientation; yaw=math.atan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z))
   angle=math.atan2(math.sin(yaw-target['yaw']),math.cos(yaw-target['yaw']))
-  return math.hypot(pose.pose.position.x-target['x'],pose.pose.position.y-target['y'])<=POSITION_RELEASE and abs(angle)<.13
+  return math.hypot(pose.pose.position.x-target['x'],pose.pose.position.y-target['y'])<=(yaw_position_limit if yaw_priority_latched else POSITION_RELEASE) and abs(angle)<.13
  def tf_reason():
   try:
    t=tf_buffer.lookup_transform('map','nav_base',Time())
@@ -345,7 +348,9 @@ def main():
    if error:fault(error+'；'+reason);return
    pause_inputs(reason,now,'motion');return
   if reason.startswith('[ZERO_TRANSLATION_DRIFT]') and state in ('ALIGN_PATH','ALIGN_YAW'):
-   reacquire(reason,now);return
+   if state=='ALIGN_YAW':fault('[FINAL_ALIGNMENT_DRIFT] '+reason)
+   else:reacquire(reason,now)
+   return
   if reason:fault(reason);return
   msg=Twist();msg.linear.x=vx;msg.angular.z=wz;vel.publish(msg);last_sent=(vx,wz)
   if now>=next_control_log:
@@ -515,7 +520,12 @@ def main():
      print('[FINAL_POSE_ACCEPTABLE] 位置和朝向已在最终验收范围；直接停车复核，不追加转向。',flush=True)
      continue
     wz,reason=alignment.command(current_pose(),now,current_odom(),odom.twist.twist.angular.z)
-    if reason.startswith('[ALIGN_ODOM_DRIFT]'):reacquire(reason,now);continue
+    if reason.startswith('[ALIGN_ODOM_DRIFT]'):
+     if state=='ALIGN_YAW':fault('[FINAL_ALIGNMENT_DRIFT] '+reason)
+     else:reacquire(reason,now)
+     continue
+    if reason.startswith('[ALIGN_GOAL_SHIFT]') and state=='ALIGN_YAW' and yaw_priority_latched:
+     fault('[FINAL_POSITION_ENVELOPE] '+reason);continue
     if reason.startswith('[ALIGN_GOAL_SHIFT]') and state=='ALIGN_YAW':
      print('[GOAL_BOUNDARY_HOLD] '+reason+'；不立即消耗恢复次数，停稳后要求连续1秒新鲜数据复核。',flush=True)
      transition('STOPPING');deadline=min(execution_deadline,now+10);halt_at=now;stop_sequences.clear();settled_review.reset();zero();continue
@@ -542,9 +552,11 @@ def main():
     pos=current_pose();stamp=(pose.header.stamp.sec,pose.header.stamp.nanosec)
     stationary=stopped()
     if not stationary:stop_sequences.clear()
-    action=settled_review.update(pos,[target['x'],target['y'],target['yaw']],now,stamp,stationary,sdk.get('state_sequence'),current_odom())
+    action=settled_review.update(pos,[target['x'],target['y'],target['yaw']],now,stamp,stationary,sdk.get('state_sequence'),current_odom(),yaw_position_limit if yaw_priority_latched else POSITION_RELEASE)
     if action=='WAIT':continue
     print('[SETTLED_CHECK] stable=1.0s action=%s distance=%.3fm yaw_error=%.3frad' % (action,math.hypot(pos[0]-target['x'],pos[1]-target['y']),wrap(target['yaw']-pos[2])),flush=True)
+    if action=='REPLAN' and yaw_priority_latched:
+     fault('[FINAL_POSITION_ENVELOPE] 位置超过35cm；停止而不循环位置恢复。');continue
     if action=='REPLAN':
      reacquire('[STOPPING_POSITION_SHIFT] 停稳且连续1秒新鲜定位确认位置超过0.20m，重新接近目标',now);continue
     if action=='ALIGN_YAW':
@@ -554,7 +566,8 @@ def main():
      print('[ALIGN_YAW_RESUME] 停稳连续复核位置合格，仅微调朝向，不消耗重新接近次数。',flush=True)
      continue
     # The same stable window already contains two distinct SDK reports.
-    print('[FINAL_ERROR] position_error=%.3fm yaw_error=%.4frad; policy=yaw_priority position_limit=0.20m yaw_limit=0.13rad' % (math.hypot(pos[0]-target['x'],pos[1]-target['y']),wrap(target['yaw']-pos[2])),flush=True)
+    print('[FINAL_ERROR] position_error=%.3fm yaw_error=%.4frad; policy=yaw_priority position_limit=0.35m yaw_limit=0.13rad' % (math.hypot(pos[0]-target['x'],pos[1]-target['y']),wrap(target['yaw']-pos[2])),flush=True)
+    if math.hypot(pos[0]-target['x'],pos[1]-target['y'])>POSITION_RELEASE:print('[POSITION_APPROXIMATE] 朝向完成，位置超过20cm；实际误差见FINAL_ERROR。',flush=True)
     transition('DONE')
    elif state=='REACQUIRE_STOP':
     zero()
