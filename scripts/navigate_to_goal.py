@@ -134,7 +134,9 @@ def main():
   event=dict(previous=old,state=state,reason=reason,recovery=budget.snapshot(time.monotonic()))
   trace.emit('transition',**event);print('[NAV_EVENT] '+json.dumps(dict(task_id=task_id,**event),ensure_ascii=False),flush=True)
  def begin_alignment(*a,**kw):
-  if kw.get('check_goal_position',True):kw['position_limit']=yaw_position_limit if yaw_priority_latched else POSITION_RELEASE
+  if kw.get('check_goal_position',True):
+   kw['position_limit']=yaw_position_limit if yaw_priority_latched else POSITION_RELEASE
+   kw['yaw_priority']=yaw_priority_latched
   motion_guard.reset();return HeadingAlignment(*a,**kw)
  def source_age(header):
   return n.get_clock().now().nanoseconds/1e9-header.stamp.sec-header.stamp.nanosec*1e-9
@@ -346,7 +348,7 @@ def main():
   nonlocal next_control_log,last_sent
   t=odom.twist.twist
   measured=(t.linear.x,t.linear.y,t.angular.z)
-  reason=motion_guard.check(vx,wz,measured,now,current_odom()[:2],current_odom()[2] if state=='NAVIGATE' else None)
+  reason=motion_guard.check(vx,wz,measured,now,current_odom()[:2],current_odom()[2] if state=='NAVIGATE' else None,zero_translation_limit=None if state=='ALIGN_YAW' and yaw_priority_latched else .12)
   if reason.startswith(('[NO_MOTION_RESPONSE]','[ZERO_TRANSLATION_DRIFT]','[ROUTE_SPIN]')) and state=='NAVIGATE':
    error=budget.request('motion')
    if error:fault(error+'；'+reason);return

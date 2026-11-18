@@ -1,7 +1,7 @@
 entry: null
-entry_map_id: d1_hall_100832_hall_clean
+entry_map_id: d1_stairs_3d_20261117_160854
 initial_floor: lower
-map_version: hall_clean
+map_version: classroom
 maps_validated: true
 navigation:
   footprint_source: 'original config/planner.yaml: 0.98 x 0.53 m; verify with current

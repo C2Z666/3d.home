@@ -96,7 +96,7 @@ def initial_path_heading(points, pose):
 
 
 class HeadingAlignment:
-    def __init__(self, pose, target, now, odom_pose, check_goal_position=True, position_limit=POSITION_RELEASE):
+    def __init__(self, pose, target, now, odom_pose, check_goal_position=True, position_limit=POSITION_RELEASE, yaw_priority=False):
         self.target = target
         self.started = self.progress_at = now
         self.best_angle = abs(wrap(target[2]-pose[2]))
@@ -104,6 +104,9 @@ class HeadingAlignment:
         self.odom_anchor = odom_pose[:]
         self.check_goal_position = check_goal_position
         self.position_limit = position_limit
+        # Preserve an odometry-only outer bound without contradicting the goal envelope.
+        initial_distance=math.hypot(pose[0]-target[0],pose[1]-target[1])
+        self.odom_drift_limit = position_limit+initial_distance if yaw_priority else .12
 
     def diagnostics(self, pose, odom_pose):
         dx,dy = odom_pose[0]-self.odom_anchor[0],odom_pose[1]-self.odom_anchor[1]
@@ -118,8 +121,8 @@ class HeadingAlignment:
         stats = self.diagnostics(pose,odom_pose)
         error = wrap(self.target[2]-pose[2])
         details = ' odom_drift=%.3fm map_alignment_shift=%.3fm goal_distance=%.3fm' % tuple(stats.values())
-        if stats['odom_drift_m'] > .12:
-            return 0., '[ALIGN_ODOM_DRIFT] 转向期间FAST-LIO机身位移超过0.12m，停车复核并重新规划；'+details
+        if stats['odom_drift_m'] > self.odom_drift_limit:
+            return 0., '[ALIGN_ODOM_DRIFT] 转向期间里程计净位移超过本阶段边界%.3fm；' % self.odom_drift_limit+details
         if self.check_goal_position and stats['goal_distance_m'] > self.position_limit:
             return 0., '[ALIGN_GOAL_SHIFT] 地图中终点距离超过%.2fm，先保持零速并连续复核；' % self.position_limit+details
         if now-self.started >= ALIGN_TIMEOUT:
@@ -202,7 +205,7 @@ class MotionGuard:
         self.zero_anchor=None;self.zero_since=None
         self.spin_yaw=None;self.spin_angle=0.
 
-    def check(self, vx, wz, measured, now, position, route_yaw=None):
+    def check(self, vx, wz, measured, now, position, route_yaw=None, zero_translation_limit=.12):
         mx, my, mw = measured
         if not all(math.isfinite(v) for v in (vx, wz, mx, my, mw,*position)):
             return '[INVALID_MOTION] 指令或实测速度不是有限数值'
@@ -214,11 +217,11 @@ class MotionGuard:
                 return '[ROUTE_SPIN] DWB低平移指令下累计转动超过半圈，停车重规划；vx=%.3f wz=%.3f angle=%.3frad' % (vx,wz,self.spin_angle)
         else:
             self.spin_yaw=None;self.spin_angle=0.
-        if abs(vx)<=.005:
+        if abs(vx)<=.005 and zero_translation_limit is not None:
             if self.zero_anchor is None:
                 self.zero_anchor=tuple(position);self.zero_since=now
             drift=math.hypot(position[0]-self.zero_anchor[0],position[1]-self.zero_anchor[1])
-            if now-self.zero_since>=2. and drift>.12:
+            if now-self.zero_since>=2. and drift>zero_translation_limit:
                 return '[ZERO_TRANSLATION_DRIFT] 零平移请求下FAST-LIO净位移超过0.12m；duration=%.2fs displacement=%.3fm command=(%.3f,%.3f) measured=(%.3f,%.3f,%.3f)' % (now-self.zero_since,drift,vx,wz,mx,my,mw)
         else:
             self.zero_anchor=None;self.zero_since=None

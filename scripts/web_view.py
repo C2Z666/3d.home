@@ -93,7 +93,7 @@ def handler(state,maps,camera,references,ros_now,scene_info,default_scene,previe
                 if scene_name not in maps: scene_name=default_scene
                 if url.path=='/map-versions':
                     data=map_versions.catalog(state.root)
-                    result={'active':data['active'],'versions':[{'name':k,'label':v['label']} for k,v in data['versions'].items()],'switching':map_versions.busy(state.root)}
+                    result={'active':data['active'],'versions':[{'name':k,'label':v['label'],'scene':'old' if k==data['active'] else k,'navigation_enabled':v.get('navigation_enabled',True)} for k,v in data['versions'].items()],'switching':map_versions.busy(state.root)}
                     status=state.root/'work/map_switch_status.json'
                     if status.exists():result['status']=json.loads(status.read_text())
                     return self.send(200,json.dumps(result,ensure_ascii=False).encode(),'application/json; charset=utf-8')
@@ -121,6 +121,9 @@ def handler(state,maps,camera,references,ros_now,scene_info,default_scene,previe
                     data['entry']=spec.get('entry')
                     data['entry_identity_ok']=not spec.get('entry') or spec['map_id']==state.map_id
                     data['maps']={k:v[0] for k,v in maps[scene_name].items()}
+                    versions=map_versions.catalog(state.root)
+                    version=versions['versions'].get(versions['active'] if scene_name=='old' else scene_name)
+                    data['floor_names']={k:Path(v['image']).stem for k,v in version['maps'].items()} if version else {}
                     site=yaml.safe_load((state.root/'config/site.yaml').read_text())
                     same=site.get('entry_map_id')==spec['map_id']
                     data['validation']={k:bool(same and site.get(k)) for k in ('maps_validated','scan_source_validated')}

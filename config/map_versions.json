@@ -1,51 +1,27 @@
 {
   "schema": 1,
-  "active": "hall_clean",
+  "active": "classroom",
   "versions": {
     "classroom": {
-      "label": "教室原地图",
+      "label": "教室",
       "map_id": "d1_stairs_3d_20261117_160854",
       "visual_map": "assets/map_versions/classroom/visual_map.npz",
       "calibration": "assets/map_versions/classroom/calibration.yaml",
       "maps": {
         "lower": {
-          "yaml": "assets/map_versions/classroom/lower.yaml",
-          "image": "assets/map_versions/classroom/lower.pgm"
+          "yaml": "assets/map_versions/classroom/platform_01.yaml",
+          "image": "assets/map_versions/classroom/platform_01.pgm"
         }
       },
       "sha256": {
         "assets/map_versions/classroom/visual_map.npz": "6e75f660811b7e1557338253ac5f35e2aba13121f9140ac2b48fd3c4dd7263f6",
         "assets/map_versions/classroom/calibration.yaml": "8aeff98d4fbea764583a87ac57a1943e0ded95ba2ff228595ed924d4b7884d10",
-        "assets/map_versions/classroom/lower.yaml": "e7b11103f9de5ec7b8e9d0d70af0f9977333fa4d463d198b2c9de1a991d84640",
-        "assets/map_versions/classroom/lower.pgm": "b3d5901d9478cfb9adeb735262d9ac5987fb16273d4c2907fd2f578a4d9f432a"
-      }
-    },
-    "hall_original": {
-      "label": "楼道大厅（原始）",
-      "map_id": "d1_hall_100832_hall_original",
-      "visual_map": "assets/map_versions/hall_shared/visual_map.npz",
-      "calibration": "assets/map_versions/hall_shared/calibration.yaml",
-      "maps": {
-        "lower": {
-          "yaml": "assets/map_versions/hall_original/floor_maps/floor1.yaml",
-          "image": "assets/map_versions/hall_original/floor_maps/floor1.pgm"
-        },
-        "upper": {
-          "yaml": "assets/map_versions/hall_original/floor_maps/floor2_platform.yaml",
-          "image": "assets/map_versions/hall_original/floor_maps/floor2_platform.pgm"
-        }
-      },
-      "sha256": {
-        "assets/map_versions/hall_shared/visual_map.npz": "41347ec9587e7804469fb0b7bc07436f785e4d6dd3ae03dafb0ef89788678f0d",
-        "assets/map_versions/hall_shared/calibration.yaml": "8aeff98d4fbea764583a87ac57a1943e0ded95ba2ff228595ed924d4b7884d10",
-        "assets/map_versions/hall_original/floor_maps/floor1.yaml": "931bcfae0cb1b9a05ae0487a0de82ab42028f904de4c1d28802eb2d8f41701d4",
-        "assets/map_versions/hall_original/floor_maps/floor1.pgm": "efc37d835aa76be78ce81bbfd05b26c54bda4c04d5ee0affdcff70454450ff9b",
-        "assets/map_versions/hall_original/floor_maps/floor2_platform.yaml": "49f85ba87b2a0482e95b318f0ea7666211d8514f121c531d02f8d38b73b055fe",
-        "assets/map_versions/hall_original/floor_maps/floor2_platform.pgm": "488a1df77695f8acc7238c3b3e9af11d1e944182347191b798195e3d1e0dc0ff"
+        "assets/map_versions/classroom/platform_01.yaml": "e37761dadb9525ee8a9c654fb3f68ddf6da198b9965561111d8b7baf1277c448",
+        "assets/map_versions/classroom/platform_01.pgm": "b3d5901d9478cfb9adeb735262d9ac5987fb16273d4c2907fd2f578a4d9f432a"
       }
     },
     "hall_clean": {
-      "label": "楼道大厅（清理版）",
+      "label": "楼道大厅",
       "map_id": "d1_hall_100832_hall_clean",
       "visual_map": "assets/map_versions/hall_shared/visual_map.npz",
       "calibration": "assets/map_versions/hall_shared/calibration.yaml",
@@ -66,6 +42,31 @@
         "assets/map_versions/hall_clean/floor_maps/floor1.pgm": "2b339e6f30ea5ccc262f1f45948311a235b93fba78f440cccf9f9e5d63110c2d",
         "assets/map_versions/hall_clean/floor_maps/floor2_platform.yaml": "49f85ba87b2a0482e95b318f0ea7666211d8514f121c531d02f8d38b73b055fe",
         "assets/map_versions/hall_clean/floor_maps/floor2_platform.pgm": "388085ae110bffe3d8e75ac80ee47971bb1fb42910cd741c9cbc84691c0c46f2"
+      }
+    },
+    "front_A": {
+      "label": "仅楼道黑夜",
+      "map_id": "front_A_20261113_205139",
+      "visual_map": "assets/scenes/front_A_20261113_205139/visual_map.npz",
+      "calibration": "assets/map_versions/classroom/calibration.yaml",
+      "maps": {
+        "lower": {
+          "yaml": "assets/scenes/front_A_20261113_205139/maps/floor1.yaml",
+          "image": "assets/scenes/front_A_20261113_205139/maps/floor1.pgm"
+        },
+        "upper": {
+          "yaml": "assets/scenes/front_A_20261113_205139/maps/floor2.yaml",
+          "image": "assets/scenes/front_A_20261113_205139/maps/floor2.pgm"
+        }
+      },
+      "navigation_enabled": false,
+      "sha256": {
+        "assets/scenes/front_A_20261113_205139/visual_map.npz": "b86162020ad0f3e103b218929b7dedd522168f94c17cad611268a953bfe6f713",
+        "assets/map_versions/classroom/calibration.yaml": "8aeff98d4fbea764583a87ac57a1943e0ded95ba2ff228595ed924d4b7884d10",
+        "assets/scenes/front_A_20261113_205139/maps/floor1.yaml": "05f2350d48384f55ade91747068af603fb0518f9d0508f32381a4eb549815ab2",
+        "assets/scenes/front_A_20261113_205139/maps/floor1.pgm": "3c904395bc217aab6c142354d8cf9f9c74449bb415bdad16bb48549dbab73988",
+        "assets/scenes/front_A_20261113_205139/maps/floor2.yaml": "59a665307e73a68ca68789f3f2afa72d631d28276615d491749539b073f09ae9",
+        "assets/scenes/front_A_20261113_205139/maps/floor2.pgm": "ed46b9975bc641996fd253fef05b5755b485ac43362b57016e2593a303545dba"
       }
     }
   }

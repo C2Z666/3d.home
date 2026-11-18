@@ -3,17 +3,13 @@
   "default": "old",
   "scenes": {
     "old": {
-      "label": "楼道大厅（清理版）",
-      "map_id": "d1_hall_100832_hall_clean",
+      "label": "教室",
+      "map_id": "d1_stairs_3d_20261117_160854",
       "visual_map": "assets/output/demo/visual_map.npz",
       "maps": {
         "lower": {
           "yaml": "maps/lower.yaml",
           "image": "maps/lower.pgm"
-        },
-        "upper": {
-          "yaml": "maps/upper.yaml",
-          "image": "maps/upper.pgm"
         }
       },
       "entry": null,
@@ -21,22 +17,51 @@
       "note": "New 3D database installed; platform_01 is the only validated map layer. Re-mark the live pose before navigation."
     },
     "front_A": {
-      "label": "New scene (front_A_20261113_205139)",
+      "label": "仅楼道黑夜",
       "map_id": "front_A_20261113_205139",
       "visual_map": "assets/scenes/front_A_20261113_205139/visual_map.npz",
       "maps": {
         "lower": {
-          "yaml": "assets/scenes/front_A_20261113_205139/maps/lower.yaml",
-          "image": "assets/scenes/front_A_20261113_205139/maps/lower.pgm"
+          "yaml": "assets/scenes/front_A_20261113_205139/maps/floor1.yaml",
+          "image": "assets/scenes/front_A_20261113_205139/maps/floor1.pgm"
         },
         "upper": {
-          "yaml": "assets/scenes/front_A_20261113_205139/maps/upper.yaml",
-          "image": "assets/scenes/front_A_20261113_205139/maps/upper.pgm"
+          "yaml": "assets/scenes/front_A_20261113_205139/maps/floor2.yaml",
+          "image": "assets/scenes/front_A_20261113_205139/maps/floor2.pgm"
         }
       },
       "entry": null,
-      "navigation_enabled": false,
-      "note": "Visual bank and 2D maps added; stair entry pose still requires field validation."
+      "navigation_enabled": false
+    },
+    "classroom": {
+      "label": "教室",
+      "map_id": "d1_stairs_3d_20261117_160854",
+      "visual_map": "assets/map_versions/classroom/visual_map.npz",
+      "maps": {
+        "lower": {
+          "yaml": "assets/map_versions/classroom/platform_01.yaml",
+          "image": "assets/map_versions/classroom/platform_01.pgm"
+        }
+      },
+      "entry": null,
+      "navigation_enabled": true
+    },
+    "hall_clean": {
+      "label": "楼道大厅",
+      "map_id": "d1_hall_100832_hall_clean",
+      "visual_map": "assets/map_versions/hall_shared/visual_map.npz",
+      "maps": {
+        "lower": {
+          "yaml": "assets/map_versions/hall_clean/floor_maps/floor1.yaml",
+          "image": "assets/map_versions/hall_clean/floor_maps/floor1.pgm"
+        },
+        "upper": {
+          "yaml": "assets/map_versions/hall_clean/floor_maps/floor2_platform.yaml",
+          "image": "assets/map_versions/hall_clean/floor_maps/floor2_platform.pgm"
+        }
+      },
+      "entry": null,
+      "navigation_enabled": true
     }
   }
 }

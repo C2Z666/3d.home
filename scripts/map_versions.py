@@ -43,7 +43,7 @@ def install(root,name):
         atomic(root/f'maps/{floor}.yaml',yaml.safe_dump(meta).encode())
         maps[floor]={'yaml':f'maps/{floor}.yaml','image':f'maps/{floor}.pgm'}
     scenes=json.loads((root/'config/scenes.json').read_text())
-    scenes['default']='old';scenes['scenes']['old'].update(label=v['label'],map_id=v['map_id'],maps=maps,entry=None,navigation_enabled=True)
+    scenes['default']='old';scenes['scenes']['old'].update(label=v['label'],map_id=v['map_id'],maps=maps,entry=None,navigation_enabled=v.get('navigation_enabled',True))
     atomic(root/'config/scenes.json',json.dumps(scenes,ensure_ascii=False,indent=2).encode())
     site=yaml.safe_load((root/'config/site.yaml').read_text());site.update(entry=None,entry_map_id=v['map_id'])
     # Preserve existing operator validation policy; no new inspection is invented.
@@ -63,6 +63,7 @@ def request(root,name,navigation,preview):
         snap=preview.snapshot()
         if snap.get('sdk_age',99)>1 or snap.get('sdk',{}).get('command_zero') is not True:raise ValueError('需要新鲜的零速度指令状态才能切换')
         if name not in catalog(root)['versions']:raise ValueError('未知地图版本')
+        if catalog(root)['versions'][name].get('navigation_enabled',True) is False:raise ValueError('此地图包当前仅用于查看，尚未完成导航配置')
         pending=root/'work/map_switch.pending'
         try: fd=os.open(pending,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
         except FileExistsError:raise ValueError('地图正在切换，请稍候')

@@ -1,0 +1,10 @@
+free_thresh: 0.196
+image: platform_01.pgm
+mode: trinary
+negate: 0
+occupied_thresh: 0.65
+origin:
+- -7.98281
+- -5.42383
+- 0.0
+resolution: 0.05
