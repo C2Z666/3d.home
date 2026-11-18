@@ -108,7 +108,7 @@ class NavigationManager:
                 print('[NAV_CANCEL] '+self.task['task_id'],flush=True)
             return self.snapshot()
 
-    def snapshot(self):
+    def snapshot(self, include_logs=True):
         with self.lock:
             task=dict(self.task) if self.task else None
             if task and self.started_mono is not None:
@@ -122,7 +122,7 @@ class NavigationManager:
                         if value.get('task_id')==task['task_id']:
                             telemetry=value;telemetry['fresh']=0<=time.time()-value.get('updated_at',0)<2
                 except (OSError,ValueError):pass
-            return dict(ok=True,task=task,telemetry=telemetry,logs=list(self.lines),active=self.process is not None and self.process.poll() is None)
+            return dict(ok=True,task=task,telemetry=telemetry,logs=list(self.lines) if include_logs else [],active=self.process is not None and self.process.poll() is None)
 
     def close(self):
         with self.lock:

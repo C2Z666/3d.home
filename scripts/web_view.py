@@ -110,7 +110,7 @@ def handler(state,maps,camera,references,ros_now,scene_info,default_scene,previe
                     if status.exists():result['status']=json.loads(status.read_text())
                     return self.send(200,json.dumps(result,ensure_ascii=False).encode(),'application/json; charset=utf-8')
                 if url.path=='/navigation':
-                    result=navigation.snapshot() if navigation else dict(ok=False,error='导航执行未启用')
+                    result=navigation.snapshot(include_logs=q.get('logs',['1'])[0]!='0') if navigation else dict(ok=False,error='导航执行未启用')
                     return self.send(200,json.dumps(result,ensure_ascii=False,allow_nan=False).encode(),'application/json; charset=utf-8')
                 if url.path=='/':return self.send(200,html,'text/html; charset=utf-8')
                 if url.path=='/preview-costmap':
@@ -139,6 +139,14 @@ def handler(state,maps,camera,references,ros_now,scene_info,default_scene,previe
                     site=yaml.safe_load((state.root/'config/site.yaml').read_text())
                     same=site.get('entry_map_id')==spec['map_id']
                     data['validation']={k:bool(same and site.get(k)) for k in ('maps_validated','scan_source_validated')}
+                    if q.get('compact',['0'])[0]=='1':
+                        # Keep recent full-resolution poses for scan timestamp interpolation.
+                        data['trajectory']=data.get('trajectory',[])[-30:]
+                        data.pop('plan',None)
+                        health=data.get('scan_health')
+                        if isinstance(health,dict):
+                            data['scan_health']={k:v for k,v in health.items() if k not in ('near_front_base','near_front_odom')}
+
                     return self.send(200,json.dumps(data,ensure_ascii=False,allow_nan=False).encode(),'application/json; charset=utf-8')
                 if url.path=='/map.png':
                     floor=q.get('floor',['lower'])[0]
@@ -228,7 +236,19 @@ def main():
     n.create_subscription(LaserScan,'/d1/nav/scan',scan,qos_profile_sensor_data)
     n.create_subscription(Odometry,'/d1/localization/odom',odom,10)
     n.create_subscription(NavPath,'/plan',path,1)
-    n.create_subscription(Image,'/front_camera/image',image,qos_profile_sensor_data)
+    camera_subscription=None
+    def update_camera_subscription():
+        nonlocal camera_subscription
+        with state.lock:
+            wanted=time.monotonic()-camera.get('requested_at',-math.inf)<3
+        if wanted and camera_subscription is None:
+            camera_subscription=n.create_subscription(Image,'/front_camera/image',image,qos_profile_sensor_data)
+        elif not wanted and camera_subscription is not None:
+            n.destroy_subscription(camera_subscription)
+            camera_subscription=None
+            with state.lock:
+                for key in ('image','at','stamp'):camera.pop(key,None)
+    n.create_timer(.5,update_camera_subscription)
     scene_info={name:{k:v for k,v in bundle.items() if k not in ('root','visual_map','maps')} for name,bundle in bundles.items()}
     from preview_planner import PreviewPlanner
     preview=PreviewPlanner(n,state,maps,default_scene)
