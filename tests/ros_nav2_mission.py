@@ -70,6 +70,7 @@ def step():
  actual_vx+=max(-.5*dt,min(.5*dt,vx-actual_vx))
  actual_wz+=max(-1.*dt,min(1.*dt,wz-actual_wz))
  vx=actual_vx;wz=0. if abs(actual_wz)<.08 else actual_wz
+ if os.environ.get('D1_TEST_WEAK_PLANT')=='1' and current_case=='approved_path':vx=max(0.,vx-.07)*.6
  if current_case=='slow_turn':wz*=.5
  if current_case=='turn_stall':wz=0.
  if current_case=='motion_retry' and not (W/'motion_retry.log').exists():vx=0.
@@ -130,9 +131,9 @@ try:
   for _ in range(30):step()
   drift_enabled=case in ('turn_drift','turn_drift_path')
   target_x=3.0 if case=='data_retries' else 3. if case=='runtime_limit' else .02 if case in ('approved_turn','slow_turn','turn_stall','unexpected_reverse','turn_obstacle','tf_transient_turn','turn_inflation','turn_drift') else -.5 if case in ('behind_path','visual_shift_turn','turn_drift_path') else .65 if case=='curved_path' else .55
-  target_y=.1 if case=='behind_path' else .6 if case=='curved_path' else 0.
+  target_y=.04 if os.environ.get('D1_TEST_WEAK_PLANT')=='1' and case=='approved_path' else .1 if case=='behind_path' else .6 if case=='curved_path' else 0.
   target_yaw=2.8 if case=='tf_transient_turn' else 2. if case=='terminal_shift' else math.pi if case in ('slow_turn','visual_shift_turn','turn_drift','turn_drift_path') else 1. if case in ('approved_turn','turn_stall','unexpected_reverse','behind_path','turn_obstacle','turn_inflation') else math.pi/2 if case=='curved_path' else 0.
-  runtime=60. if case=='data_retries' else 60. if case in ('visual_shift_turn','terminal_shift','tf_transient_turn','turn_drift','turn_drift_path') else 30. if case in ('behind_path','curved_path','slow_turn','tf_transient','motion_retry') else 20. if case in ('approved_path','approved_turn') else 10.
+  runtime=40. if os.environ.get('D1_TEST_WEAK_PLANT')=='1' and case=='approved_path' else 60. if case=='data_retries' else 60. if case in ('visual_shift_turn','terminal_shift','tf_transient_turn','turn_drift','turn_drift_path') else 30. if case in ('behind_path','curved_path','slow_turn','tf_transient','motion_retry') else 20. if case in ('approved_path','approved_turn') else 10.
   args=['--live','--x',str(target_x),'--y',str(target_y),'--yaw',str(target_yaw),'--max-runtime',str(runtime)]
   route=R/'work/approved_test.path.json';route.parent.mkdir(exist_ok=True)
   if case=='curved_path':

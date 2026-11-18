@@ -561,19 +561,24 @@ def main():
     zero_age=source_age(pose.header)
     stamp=pose.header.stamp.sec+pose.header.stamp.nanosec*1e-9
     vx,decision=terminal_approach.command(current_pose(),[target['x'],target['y']],odom.twist.twist.linear.x,stamp,now,zero_age)
+    wz=terminal_approach.wz
     if decision=='ADVANCE':
      if not costmap_fresh(now):zero();continue
      op=current_odom();blocked=''
      # Conservative swept padded-body disk, includes 0.15m/s upper speed and braking.
-     for step in (0.,.05,.10,.15):
-      blocked=rotation_clearance(costmap,(op[0]+step*math.cos(op[2]),op[1]+step*math.sin(op[2])),turn_radius)
+     for step in (0.,.05,.10,.15,.20):
+      angle=wz*step/max(vx,.01)
+      local_x=step if abs(wz)<1e-6 else vx/wz*math.sin(angle)
+      local_y=0. if abs(wz)<1e-6 else vx/wz*(1-math.cos(angle))
+      centre=(op[0]+local_x*math.cos(op[2])-local_y*math.sin(op[2]),op[1]+local_x*math.sin(op[2])+local_y*math.cos(op[2]))
+      blocked=rotation_clearance(costmap,centre,turn_radius+.025)
       if blocked:break
-     if blocked:vx=0.;decision='POSITION_BLOCKED:'+blocked
+     if blocked:vx=0.;wz=0.;decision='POSITION_BLOCKED:'+blocked
     if now>=next_feedback_log:
-     print('[CLOSED_LOOP_POSITION] source_age=%.3fs decision=%s distance=%.3fm measured_vx=%.4f output_vx=%.3f' % (zero_age,decision,math.hypot(current_pose()[0]-target['x'],current_pose()[1]-target['y']),odom.twist.twist.linear.x,vx),flush=True);next_feedback_log=now+.5
+     print('[CLOSED_LOOP_POSITION] source_age=%.3fs decision=%s distance=%.3fm measured_vx=%.4f output_vx=%.3f output_wz=%.3f feedback=%s' % (zero_age,decision,math.hypot(current_pose()[0]-target['x'],current_pose()[1]-target['y']),odom.twist.twist.linear.x,vx,wz,json.dumps(terminal_approach.diagnostics)),flush=True);next_feedback_log=now+.5
     if decision=='WAIT_SAMPLE':zero();motion_guard.reset();continue
     if decision in ('INVALID_SAMPLE','STAMP_REGRESSION'):fault('[FEEDBACK_INVALID] '+decision);continue
-    if decision=='ADVANCE':output(vx,0.,now)
+    if decision=='ADVANCE':output(vx,wz,now)
     else:
      zero();transition('STOPPING');deadline=min(execution_deadline,now+10);halt_at=now
      print('[POSITION_FINISHED] '+decision+'；位置微调结束，转入最终朝向，不重试位置。',flush=True)
@@ -592,10 +597,12 @@ def main():
      approach_attempted=True
      distance=math.hypot(pos[0]-target['x'],pos[1]-target['y'])
      bearing=wrap(math.atan2(target['y']-pos[1],target['x']-pos[0])-pos[2])
-     if .13<distance<=.30 and abs(bearing)<=.18 and execution_deadline-now>12.:
-      terminal_approach=TerminalApproach(now,pos);motion_guard.reset()
+     yaw_reserve=max(8.,abs(wrap(target['yaw']-pos[2]))/.18+4.)
+     approach_budget=min(12.,execution_deadline-now-yaw_reserve)
+     if .13<distance<=.30 and abs(bearing)<=.6 and approach_budget>=2.:
+      terminal_approach=TerminalApproach(now,pos,approach_budget);motion_guard.reset()
       transition('TERMINAL_APPROACH');deadline=execution_deadline
-      print('[POSITION_ATTEMPT] 一次有界前进闭环，最多6秒；新定位更新，零或0.10m/s；不可改善则保留时间完成最终朝向。',flush=True);continue
+      print('[POSITION_ATTEMPT] 一次有界接近闭环，最多12秒；0.10至0.15m/s按响应调整，小幅转向修正；按朝向误差预留最终转向时间，不循环位置重试。',flush=True);continue
     print('[SETTLED_CHECK] stable=1.0s action=%s distance=%.3fm yaw_error=%.3frad' % (action,math.hypot(pos[0]-target['x'],pos[1]-target['y']),wrap(target['yaw']-pos[2])),flush=True)
     if action=='REPLAN' and yaw_priority_latched:
      fault('[FINAL_POSITION_ENVELOPE] 位置超过35cm；停止而不循环位置恢复。');continue
