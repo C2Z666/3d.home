@@ -34,6 +34,15 @@ class TerminalApproach:
         self.samples = []
         self.diagnostics = {}
 
+    def resume_after_pause(self, duration):
+        # Waiting for sensors is not an unsuccessful motion attempt.
+        self.started += duration
+        self.progress_at += duration
+        self.adjusted_at += duration
+        self.samples = []
+        self.feedback = FreshFeedback()
+        self.wz = 0.
+
     def command(self, pose, target, speed, stamp, now, source_age):
         if not all(math.isfinite(v) for v in (*pose, *target, speed, stamp, now, source_age)):
             self.wz=0.; return 0., 'INVALID_SAMPLE'

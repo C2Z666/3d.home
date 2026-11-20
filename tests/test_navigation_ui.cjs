@@ -2,7 +2,7 @@ const fs=require('fs'),vm=require('vm'),assert=require('node:assert/strict');
 const elements=new Map(),posts=[];
 const ctx=new Proxy({}, {get:()=>()=>{}});
 function el(id){if(!elements.has(id))elements.set(id,{value:'',checked:true,options:[],setAttribute(){},replaceChildren(...items){this.options=items;this.value=this.value||items[0]?.value||''},textContent:'',style:{},classList:{toggle(){},remove(){}},getContext:()=>ctx,getBoundingClientRect:()=>({width:800,height:570,left:0,top:0}),addEventListener(){},removeAttribute(){},showModal(){this.open=true},close(){this.open=false},focus(){}});return elements.get(id)}
-const sandbox={document:{getElementById:el,createElement:()=>({value:'',textContent:''}),hidden:false},location:{search:'?scene=old'},URLSearchParams,performance,AbortController,setTimeout:()=>1,clearTimeout(){},window:{devicePixelRatio:1},Image:function(){},console};
+const sandbox={document:{getElementById:el,createElement:()=>({value:'',textContent:''}),hidden:false},location:{search:'?scene=old'},URLSearchParams,performance,AbortController,setTimeout:()=>1,clearTimeout(){},window:{devicePixelRatio:1},Image:function(){},confirm:()=>true,console};
 vm.createContext(sandbox);
 vm.runInContext(fs.readFileSync(require('path').join(__dirname,'../web/floors.js'),'utf8'),sandbox);
 const html=fs.readFileSync(require('path').join(__dirname,'../web/index.html'),'utf8');
@@ -32,5 +32,11 @@ const init=()=>run("state={navigation_ready:true};online=true;navigationOnline=t
  assert.equal(run('stars.length'),1);assert.equal(run('stars[0].p.x'),5,'Prefer preview exit');
  run('stars=[];delete conn.preview_exit;drawConnections()');assert.equal(run('stars[0].p.x'),3,'Fall back to calibrated exit');
  run('stars=[];conn.exit=null;drawConnections()');assert.equal(run('stars.length'),0,'No fabricated exit');
+ run("meta={resolution:1,origin:[0,0,0],height:100};var lines=[];line=(p,c,w)=>lines.push({p,c,w});conn.arrival_line={x:3,y:4,yaw:0,half_width_m:.6};stars=[];navigationStatus={active:false};previewPath=null;drawConnections()");
+ assert.equal(run('lines.length'),0,'Arrival line hidden outside selected route');
+ run("previewPath={mission:{connections:[conn]}};drawConnections()");
+ assert.equal(run("lines.filter(v=>v.c==='#008c83').length"),1,'Arrival line shown for planned stair');
+ init();await el('resetWalk').onclick();
+ assert.equal(posts.at(-1).url,'/navigation/walk-reset');assert.equal(posts.at(-1).body.confirmed,true);
  console.log('PASS: confirmation, cancel, runtime/radians, duplicate prevention, stale goal, stop task binding, disconnect.');
 })().catch(e=>{console.error(e);process.exitCode=1});

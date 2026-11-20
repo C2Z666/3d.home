@@ -26,7 +26,7 @@ class FloorTests(unittest.TestCase):
         self.scene=dict(map_id='d1_hall_100832_hall_clean',maps={'lower':{},'upper':{}})
         self.registry=load_registry(ROOT,self.scene)
         self.c=copy.deepcopy(self.registry['connections'][0])
-        self.c['exit']=None  # Generic detector fixtures exercise an uncalibrated stair.
+        self.c['exit']=None;self.c.pop('arrival_line',None)  # Unmarked stair fixture.
     def test_registry_and_parallel_connections(self):
         self.assertEqual(floor_id(self.registry,'upper'),'floor2')
         other=copy.deepcopy(self.c);other['id']='B';other['entry']['x']=100
@@ -74,18 +74,17 @@ class FloorTests(unittest.TestCase):
         self.c['preview_exit']=dict(floor_id='floor2',x=100,y=100,yaw=0)
         d=LandingDetector(self.c)
         self.assertTrue(self.climb_and_level(d));self.assertFalse(d.evidence['coordinate_enabled'])
-    def test_same_xy_on_floor1_cannot_complete_calibrated_exit(self):
-        self.c['exit']=dict(x=2,y=0,yaw=0,floor_id='floor2')
-        for combine in ('all','any'):
-            self.c['completion']['combine']=combine;d=LandingDetector(self.c)
-            # Coordinate alone on floor1 cannot trigger ANY mode, either.
-            d.update(self.sample(0,map_pose=dict(x=2,y=0),candidate_floor='floor1'))
-            self.assertFalse(d.update(self.sample(1,x=1,z=.5,map_pose=dict(x=2,y=0),candidate_floor='floor1')))
-            self.assertFalse(d.evidence['coordinate_pass'])
-        self.c['completion']['combine']='all';d=LandingDetector(self.c)
-        self.assertFalse(self.climb_and_level(d,map_pose=dict(x=2,y=0),candidate_floor='floor1'))
+    def test_arrival_line_requires_target_floor_and_stable_posture(self):
+        self.c['arrival_line']=dict(x=2,y=0,yaw=0,floor_id='floor2',half_width_m=.6)
+        for fid,expected in [('floor1',False),('floor2',True)]:
+            d=LandingDetector(self.c);d.line=dict(self.c['arrival_line'],connection_id=self.c['id'])
+            self.assertEqual(self.climb_and_level(d,candidate_floor=fid),expected)
         d=LandingDetector(self.c)
-        self.assertTrue(self.climb_and_level(d,map_pose=dict(x=2,y=0),candidate_floor='floor2'))
+        self.assertFalse(self.climb_and_level(d,candidate_floor='floor2'),'Configured but unbound line must fail closed')
+    def test_exit_marker_never_becomes_stop_target(self):
+        self.c['exit']=dict(x=100,y=100,yaw=0,floor_id='floor2')
+        d=LandingDetector(self.c);self.assertTrue(self.climb_and_level(d))
+        self.assertFalse(d.evidence['coordinate_enabled'])
     def test_wrong_connection_never_completes(self):
         d=LandingDetector(self.c);self.climb_and_level(d)
         s=self.sample(5,x=2,z=.5);s['connection_id']='ordinary_navigation'

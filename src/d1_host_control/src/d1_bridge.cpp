@@ -1,4 +1,4 @@
-// D1 SDK bridge for low-speed path execution. d1-navigation-v6.5 (1Hz RobotState).
+// D1 SDK bridge for low-speed path execution. d1-navigation-v6.6 (1Hz RobotState).
 // Readiness is true only with fresh robot state, Walk posture and held control.
 
 #include <algorithm>
@@ -145,6 +145,12 @@ public:
     trace_control_ = declare_parameter<bool>("trace_control", false);
     allow_terminal_reverse_ = declare_parameter<bool>("allow_terminal_reverse", false);
     stair_max_lin_vel_ = declare_parameter<double>("stair_max_lin_vel", 0.0);
+    stair_max_ang_vel_ = declare_parameter<double>("stair_max_ang_vel", 0.0);
+    stair_max_ang_accel_ = declare_parameter<double>("stair_max_ang_accel", 0.1);
+    if (!std::isfinite(stair_max_ang_vel_) || stair_max_ang_vel_ < 0.0 || stair_max_ang_vel_ > 0.05 ||
+        !std::isfinite(stair_max_ang_accel_) || stair_max_ang_accel_ <= 0.0 || stair_max_ang_accel_ > 0.1) {
+      throw std::invalid_argument("Stair yaw rate must be [0,0.05], acceleration (0,0.1]");
+    }
     if (!std::isfinite(stair_max_lin_vel_) || stair_max_lin_vel_ < 0.0 || stair_max_lin_vel_ > 0.5) {
       throw std::invalid_argument("stair_max_lin_vel must be in [0, 0.5]");
     }
@@ -198,10 +204,13 @@ public:
       [this](geometry_msgs::msg::Twist::ConstSharedPtr msg) {
         if (!StairMotionPermitted() || !std::isfinite(msg->linear.x) || msg->linear.x < 0.0 ||
           msg->linear.y != 0.0 || msg->linear.z != 0.0 || msg->angular.x != 0.0 ||
-          msg->angular.y != 0.0 || msg->angular.z != 0.0) {StopMotion(); return;}
+          msg->angular.y != 0.0 || !std::isfinite(msg->angular.z) ||
+          std::fabs(msg->angular.z) > stair_max_ang_vel_ ||
+          (msg->linear.x == 0.0 && msg->angular.z != 0.0)) {StopMotion(); return;}
         last_cmd_ = Clock::now(); have_cmd_ = true; watchdog_lost_ = false;
         target_ = geometry_msgs::msg::Twist();
         target_.linear.x = std::min(msg->linear.x, stair_max_lin_vel_);
+        target_.angular.z = msg->angular.z;
         if (target_.linear.x == 0.0) {StopMotion();}
       });
     reverse_sub_ = create_subscription<std_msgs::msg::Bool>("terminal_reverse_permit", rclcpp::QoS(1),
@@ -256,7 +265,7 @@ public:
     timer_ = create_wall_timer(20ms, [this]() {Tick();});
     RCLCPP_INFO(logger, "Topics: /cmd_vel /d1_action /d1_speed_level /d1_posture; watchdog %.2fs",
       watchdog_timeout_);
-    RCLCPP_INFO(logger, "Control build: d1-navigation-v6.5; trace_control=%d; RobotState=1Hz timeout=2.0s; recovery status enabled", trace_control_);
+    RCLCPP_INFO(logger, "Control build: d1-navigation-v6.6; trace_control=%d; RobotState=1Hz timeout=2.0s; recovery status enabled", trace_control_);
   }
 
   ~D1Bridge() override
@@ -703,7 +712,7 @@ private:
     // safety_epoch preserves control-loss/stop events across a missed ROS message.
     std::ostringstream status_json;
     const bool state_fresh = have_state_ && Age(last_state_) < kRobotStateTimeoutSec;
-    status_json << "{\"version\":\"d1-navigation-v6.5\",\"ready\":"
+    status_json << "{\"version\":\"d1-navigation-v6.6\",\"ready\":"
                 << (readiness.data ? "true" : "false")
                 << ",\"reason\":\"" << reason << "\",\"state_age_sec\":"
                 << (have_state_ ? Age(last_state_) : -1.0)
@@ -742,6 +751,8 @@ private:
       << ",\"move_write_ok\":" << events_->move_write_ok.load()
       << ",\"move_write_failed\":" << events_->move_write_failed.load()
       << ",\"stair_speed_cap\":" << stair_max_lin_vel_
+      << ",\"stair_yaw_rate_cap\":" << stair_max_ang_vel_
+      << ",\"stair_yaw_accel_cap\":" << stair_max_ang_accel_
       << ",\"stair_motion_permitted\":" << (StairMotionPermitted() ? "true" : "false")
       << ",\"stair_fault\":" << (stair_fault_ ? "true" : "false")
       << ",\"speed_level\":" << speed_level_
@@ -786,7 +797,7 @@ private:
     }
     current_.linear.x = Approach(current_.linear.x, target_.linear.x, max_lin_accel_ * dt);
     current_.linear.y = Approach(current_.linear.y, target_.linear.y, max_lin_accel_ * dt);
-    current_.angular.z = Approach(current_.angular.z, target_.angular.z, max_ang_accel_ * dt);
+    current_.angular.z = Approach(current_.angular.z, target_.angular.z, (stair_selected_ ? std::min(max_ang_accel_, stair_max_ang_accel_) : max_ang_accel_) * dt);
     const double fb_scale = speed_level_ == 3 ? 3.0 : speed_level_ == 2 ? 2.0 : 1.0;
     double lr = Clamp(current_.linear.y / 0.5, 1.0);
     double yaw_limit = 1.5;
@@ -805,7 +816,7 @@ private:
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_sub_;
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr stair_cmd_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr stair_permit_sub_;
-  double stair_max_lin_vel_{0.0};
+  double stair_max_lin_vel_{0.0}, stair_max_ang_vel_{0.0}, stair_max_ang_accel_{0.1};
   bool stair_selected_{false}, stair_fault_{false}, stair_motion_permit_{false};
   Clock::time_point stair_permit_time_;
   rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr speed_sub_, posture_sub_;

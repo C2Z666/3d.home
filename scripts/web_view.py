@@ -70,7 +70,7 @@ def handler(state,maps,camera,references,ros_now,scene_info,default_scene,previe
             self.wfile.write(body)
         def do_POST(self):
             endpoint=urlparse(self.path).path
-            if endpoint not in ('/preview-plan','/navigation/start','/navigation/stop','/map-switch','/localization/manual'):
+            if endpoint not in ('/preview-plan','/navigation/start','/navigation/stop','/navigation/walk-reset','/map-switch','/localization/manual'):
                 return self.send(404,b'Not found','text/plain')
             try:
                 if self.headers.get('Origin') not in (None, 'http://'+self.headers.get('Host',''), 'https://'+self.headers.get('Host','')):
@@ -89,6 +89,9 @@ def handler(state,maps,camera,references,ros_now,scene_info,default_scene,previe
                 elif endpoint=='/navigation/start':
                     if navigation is None:raise ValueError('导航执行未启用')
                     result=navigation.start(data)
+                elif endpoint=='/navigation/walk-reset':
+                    if navigation is None:raise ValueError('导航执行未启用')
+                    result=navigation.reset_walk(data)
                 elif endpoint=='/navigation/stop':
                     if navigation is None:raise ValueError('导航执行未启用')
                     result=navigation.stop(data)

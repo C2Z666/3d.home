@@ -13,15 +13,17 @@ connections:
     to_floor: floor2
     direction: up
     trigger: mission_transition
-    entry: {x: -1.582, y: 13.577, yaw: 1.7518}
+    entry: {x: -1.582, y: 13.577, yaw: 1.9}
     exit: {floor_id: floor2, x: -3.282, y: 18.891, yaw: 1.9173}
-    # Display-only endpoint; completion always uses exit, never preview_exit.
+    # Display-only endpoints; completion uses arrival_line, never either exit point.
     preview_exit: {floor_id: floor2, x: -3.357, y: 19.05, yaw: 1.9173}
+    # Line normal is the fixed uphill heading; exit is illustration only.
+    arrival_line: {floor_id: floor2, x: -3.385384, y: 18.855680, yaw: 1.9, half_width_m: 0.6}
     cost: 8.0
     control:
       mode: Stair
       strategy: straight
-      heading_correction: false
+      heading_correction: true
       cruise_speed: 0.4
       landing_speed: 0.15
       max_runtime: 120.0
@@ -31,8 +33,19 @@ connections:
       max_lateral_m: 0.4
       max_roll_rad: 0.45
       max_pitch_rad: 0.85
+    monitor:
+      heading_deadband_rad: 0.035
+      heading_slow_rad: 0.20
+      lateral_slow_m: 0.12
+      slow_speed: 0.40
+      min_climb_speed: 0.40
+      lateral_severe_m: 0.30
+      yaw_kp: 0.6
+      yaw_kd: 0.15
+      max_yaw_rate: 0.05
+      max_yaw_accel: 0.10
     completion:
-      # The calibrated floor2 exit and stable landing posture must BOTH pass.
+      # Cross the floor2 arrival line AND maintain stable landing posture.
       combine: all
       min_rise_m: 0.35
       min_forward_m: 0.8
@@ -41,4 +54,3 @@ connections:
       stable_sec: 1.5
       height_span_m: 0.05
       level_travel_m: 0.6
-      position_tolerance_m: 0.35

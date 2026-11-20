@@ -36,13 +36,22 @@ def load_registry(root, scene):
             if name in ('exit', 'preview_exit') and p.get('floor_id')!=c['to_floor']:
                 raise ValueError('结束坐标必须明确绑定连接的目标楼层')
             if 'z' in p and not finite(p['z']):raise ValueError('楼层位姿 Z 必须为有限数值')
+        line=c.get('arrival_line')
+        if line is not None:
+            if not isinstance(line,dict) or line.get('floor_id')!=c['to_floor'] or not all(finite(line.get(k)) for k in ('x','y','yaw','half_width_m')) or line['half_width_m']<=0:
+                raise ValueError('平台到达线必须绑定目标楼层且参数有效')
+            delta=math.atan2(math.sin(line['yaw']-c['entry']['yaw']),math.cos(line['yaw']-c['entry']['yaw']))
+            if abs(delta)>.001:raise ValueError('平台到达线法线必须与预备点上楼方向一致')
+            if c['completion'].get('combine')!='all':raise ValueError('到达线与水平稳定必须同时满足')
         ctl=c['control'];end=c['completion']
-        if ctl.get('mode')!='Stair' or ctl.get('strategy')!='straight' or ctl.get('heading_correction') is not False:
-            raise ValueError('当前楼梯控制仅支持无转向 Stair 直行')
+        if ctl.get('mode')!='Stair' or ctl.get('strategy')!='straight' or not isinstance(ctl.get('heading_correction'),bool):
+            raise ValueError('楼梯控制要求 Stair 直行及显式纠偏开关')
         if not all(finite(v) and v>0 for k,v in ctl.items() if k not in ('mode','strategy','heading_correction')):
             raise ValueError('楼梯控制参数必须为正有限数值')
         if not 0<ctl['landing_speed']<=ctl['cruise_speed']<=.5:
             raise ValueError('楼梯速度要求 0 < landing <= cruise <= 0.5')
+        from stair_monitor import monitor_config
+        monitor_config(c)
         if end.get('combine') not in ('all','any') or not all(finite(v) and v>0 for k,v in end.items() if k!='combine'):
             raise ValueError('楼梯结束参数无效')
     data['revision'] = hashlib.sha256(json.dumps(data,sort_keys=True).encode()).hexdigest()
@@ -75,6 +84,20 @@ def write_state(root, registry, **changes):
     path=Path(root)/'work/floor_state.json';path.parent.mkdir(exist_ok=True)
     tmp=path.with_name(path.name+'.'+str(os.getpid())+'.tmp')
     tmp.write_text(json.dumps(value,ensure_ascii=False,allow_nan=False),encoding='utf-8');os.replace(tmp,path)
+    return value
+
+
+def reset_map_activation(root, registry):
+    """Explicit map activation restarts both planners on lower, never an old task floor."""
+    fid = floor_id(registry, 'lower')
+    value = dict(map_id=registry['map_id'], actual_floor=fid, active_nav_floor=fid,
+                 target_floor=None, phase='ON_FLOOR', connection_id=None,
+                 from_floor=None, to_floor=None, reason='', source='map_activation',
+                 base_z_by_floor={}, updated_at=time.time())
+    path=Path(root)/'work/floor_state.json';path.parent.mkdir(exist_ok=True)
+    tmp=path.with_name(path.name+'.'+str(os.getpid())+'.tmp')
+    tmp.write_text(json.dumps(value,ensure_ascii=False,allow_nan=False),encoding='utf-8')
+    os.replace(tmp,path)
     return value
 
 

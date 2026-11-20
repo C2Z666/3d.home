@@ -6,11 +6,13 @@ class NavigationManager:
     def __init__(self,root,preview):
         self.root=Path(root);self.preview=preview;self.lock=threading.RLock()
         self.plans={};self.process=None;self.task=None;self.lines=collections.deque(maxlen=150);self.started_mono=None;self.finished_mono=None
+        self.resetting=False;self.monitor_thread=None
         self.directory=self.root/'work/navigation';self.directory.mkdir(parents=True,exist_ok=True)
 
     def register(self,result):
         path=result.pop('_path')
         with self.lock:
+            if self.resetting or (self.task and self.task.get('kind')=='walk_reset' and self.process and self.process.poll() is None):raise ValueError('走路重置期间不能登记路线')
             now=time.monotonic()
             self.plans={k:v for k,v in self.plans.items() if now-v['created']<60}
             while len(self.plans)>=8:self.plans.pop(next(iter(self.plans)))
@@ -21,6 +23,7 @@ class NavigationManager:
 
     def start(self,data):
         with self.lock:
+            if self.resetting:raise ValueError('正在停止旧任务并恢复走路步态')
             from map_versions import busy
             if busy(self.root):raise ValueError('地图正在切换')
             if data.get('confirmed') is not True:raise ValueError('需要明确确认后才能执行导航')
@@ -65,8 +68,9 @@ class NavigationManager:
             self.plans.pop(data['plan_id'])
             self.lines.clear();self.started_mono=None;self.finished_mono=None
             self.task=dict(task_id=task_id,state='PREPARING',goal=plan['goal'],max_runtime=runtime,created_at=time.time(),started_at=None,reason='已确认，正在检查执行条件',log_file=str(self.directory/(task_id+'.log')))
+            self.task['route_connections']=plan.get('mission',{}).get('connections',[])
             self.task.update(multifloor='mission' in plan,target_floor=plan.get('target_floor',fs.get('actual_floor')),source_floor=fs.get('actual_floor'))
-            thread=threading.Thread(target=self._monitor,args=(self.process,task_id),daemon=True);thread.start()
+            thread=threading.Thread(target=self._monitor,args=(self.process,task_id),daemon=True);self.monitor_thread=thread;thread.start()
             print('[NAV_CONFIRM] '+json.dumps(self.task,ensure_ascii=False),flush=True)
             return self.snapshot()
 
@@ -80,7 +84,9 @@ class NavigationManager:
                     if line.startswith('[MULTIFLOOR_EVENT] '):
                         try:
                             event=json.loads(line.split(' ',1)[1])
-                            if event.get('task_id')==task_id:self.task.update(state=event['state'],phase=event['state'],reason=event.get('reason',''),stair_evidence=event.get('evidence'))
+                            if event.get('task_id')==task_id:
+                                self.task.update(state=event['state'],phase=event['state'],reason=event.get('reason',''),stair_evidence=event.get('evidence'))
+                                if 'heading_monitor' in event:self.task['heading_monitor']=event['heading_monitor']
                         except (ValueError,KeyError):pass
                     if line.startswith('[NAV_EVENT] ') and not self.task.get('multifloor'):
                         try:
@@ -109,13 +115,15 @@ class NavigationManager:
                     elif line.startswith('[REPLAN_READY]'):self.task.update(reason=line)
                     elif line.startswith('[INPUT_PAUSE]'):self.task.update(state='INPUT_PAUSE',reason=line)
                     elif line.startswith('[INPUT_RECOVERED]'):self.task.update(state='RECOVERING',reason=line)
+                    elif line.startswith('[WALK_RESET]'):self.task.update(reason=line)
                     elif line.startswith('FAULT:'):self.task.update(reason=line)
                     elif line.startswith('[WAIT]'):self.task.update(reason=line)
             code=process.wait()
             with self.lock:
                 self.finished_mono=time.monotonic()
                 self.task.update(state='SUCCEEDED' if code==0 else 'CANCELED' if code==130 or self.task['state']=='CANCELING' else 'FAILED',exit_code=code,finished_at=time.time())
-                if code==0:
+                if code==0 and self.task.get('kind')=='walk_reset':pass
+                elif code==0:
                     position=self.task.get('final_position_error_m');angle=self.task.get('final_yaw_error_rad')
                     self.task['reason']=('朝向完成并确认停稳；位置误差 %.3fm，朝向误差 %.4frad%s' % (position,angle,'（位置近似）' if self.task.get('position_approximate') else '')) if position is not None and angle is not None else '执行完成并确认停稳；详见阶段日志'
                 elif self.task['state']=='CANCELED':self.task['reason']='操作者已取消导航'
@@ -146,7 +154,7 @@ class NavigationManager:
                         if value.get('task_id')==task['task_id']:
                             telemetry=value;telemetry['fresh']=0<=time.time()-value.get('updated_at',0)<2
                 except (OSError,ValueError):pass
-            return dict(ok=True,task=task,telemetry=telemetry,logs=list(self.lines) if include_logs else [],active=self.process is not None and self.process.poll() is None)
+            return dict(ok=True,task=task,telemetry=telemetry,logs=list(self.lines) if include_logs else [],active=self.resetting or (self.process is not None and self.process.poll() is None),resetting=self.resetting)
 
     def close(self):
         with self.lock:
@@ -156,6 +164,46 @@ class NavigationManager:
             try:process.wait(timeout=4)
             except subprocess.TimeoutExpired:process.terminate()
 
+    def reset_walk(self,data):
+        from map_versions import busy
+        with self.lock:
+            if data.get('confirmed') is not True:raise ValueError('需要明确确认切换走路步态')
+            if self.resetting or (self.task and self.task.get('kind')=='walk_reset' and self.process and self.process.poll() is None):
+                raise ValueError('走路重置正在进行')
+            if busy(self.root):raise ValueError('地图切换中，暂不能重置')
+            self.resetting=True;self.plans.clear()
+            process=self.process;monitor=self.monitor_thread
+            if process and process.poll() is None:
+                if os.getpgid(process.pid)!=process.pid:
+                    self.resetting=False;raise ValueError('无法确认旧任务进程组')
+                self.task.update(state='CANCELING',reason='切换走路：先停止原任务')
+                os.killpg(process.pid,signal.SIGINT)
+        try:
+            # Do not hold the manager lock while draining the old monitor thread.
+            if process:
+                try:process.wait(timeout=8)
+                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid,signal.SIGTERM)
+                    try:process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(process.pid,signal.SIGKILL);process.wait(timeout=2)
+            if monitor:
+                monitor.join(timeout=3)
+                if monitor.is_alive():raise ValueError('旧任务日志尚未退出，未切换步态')
+            with self.lock:
+                task_id=uuid.uuid4().hex
+                args=['bash',str(self.root/'scripts/run_walk_reset.sh'),'--scene',self.preview.scene,'--owner-pid',str(os.getpid())]
+                self.process=subprocess.Popen(args,cwd=self.root,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,encoding='utf-8',errors='replace',bufsize=1,start_new_session=True)
+                self.lines.clear();self.started_mono=time.monotonic();self.finished_mono=None
+                self.task=dict(task_id=task_id,kind='walk_reset',state='PREPARING',goal=None,max_runtime=25,
+                    created_at=time.time(),started_at=time.time(),reason='正在确认停稳并恢复Walk',
+                    log_file=str(self.directory/(task_id+'.log')))
+                self.monitor_thread=threading.Thread(target=self._monitor,args=(self.process,task_id),daemon=True)
+                self.monitor_thread.start()
+                return self.snapshot()
+        finally:
+            with self.lock:self.resetting=False
+
     def manual_initialize(self,data):
         import fcntl
         from floor_routes import load_registry,floor_id
@@ -164,6 +212,7 @@ class NavigationManager:
         from rcl_interfaces.srv import SetParametersAtomically
         from rcl_interfaces.msg import Parameter,ParameterValue
         with self.lock:
+            if self.resetting:raise ValueError('正在重置步态')
             if data.get('confirmed') is not True:raise ValueError('请确认手动初值')
             if self.process is not None and self.process.poll() is None:raise ValueError('请先停止当前任务')
             scene=scene_bundle(self.root,self.preview.scene);registry=load_registry(self.root,scene)

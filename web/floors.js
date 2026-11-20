@@ -4,6 +4,7 @@ function floorInfo() { return state?.floor_state || {}; }
 function floorIdForKey(key) { return Object.entries(floorInfo().floors || {}).find(([,v])=>v.map_key===key)?.[0]; }
 function floorKey(id) { return floorInfo().floors?.[id]?.map_key; }
 function actualView() { return !!floorInfo().actual_floor && floorKey(floorInfo().actual_floor)===floor; }
+function loadedMapView() { return !!floorInfo().active_nav_floor && floorKey(floorInfo().active_nav_floor)===floor; }
 function floorLabel(id) { return floorInfo().floors?.[id]?.label || id || '过渡中／待确认'; }
 function drawStar(p,label,color='#bc7700') {
   const [x,y]=pixel(p.x,p.y);ctx.save();ctx.translate(x,y);ctx.scale(1/zoom,1/zoom);
@@ -20,12 +21,18 @@ function drawConnections() {
   for(const c of fs.connections||[]) {
     if(c.from_floor===view)drawStar(c.entry,c.label);
   }
-  for(const c of previewPath?.mission?.connections||[]) {
+  for(const c of (navigationStatus?.active&&navigationStatus?.task?.route_connections?.length?navigationStatus.task.route_connections:previewPath?.mission?.connections)||[]) {
     if(view!==c.from_floor&&view!==c.to_floor)continue;
+    if(c.arrival_line){
+      const a=c.arrival_line,w=a.half_width_m,dx=-Math.sin(a.yaw)*w,dy=Math.cos(a.yaw)*w;
+      ctx.save();ctx.setLineDash([4/zoom,3/zoom]);line([[a.x-dx,a.y-dy],[a.x+dx,a.y+dy]],'#008c83',3);
+      const q=pixel(a.x,a.y);ctx.setLineDash([]);ctx.fillStyle='#006e67';ctx.font=(12/zoom)+'px sans-serif';
+      ctx.fillText('平台到达线（越线且水平稳定）',q[0]+8/zoom,q[1]-10/zoom);ctx.restore();
+    }
     const endpoint=c.preview_exit||c.exit;
     if(endpoint){
       ctx.save();ctx.setLineDash([7/zoom,5/zoom]);line([[c.entry.x,c.entry.y],[endpoint.x,endpoint.y]],'#bc7700',2);ctx.restore();
-      if(view===c.to_floor)drawStar(endpoint,c.preview_exit?'楼梯预备出口':'楼梯出口','#6d6aaf');
+      if(view===c.to_floor)drawStar(endpoint,'楼梯出口（示意）','#6d6aaf');
     }
   }
 }
@@ -91,8 +98,9 @@ function setupFloors() {
     }catch(e){message(e.message)}finally{$('manualInitialPose').disabled=false}
   };
   $('useCurrentInitialZ').onclick=()=>{
-    if(!state?.pose_current||!actualView()){message('当前查看楼层不是已确认实际楼层，请手动填写高度。');return}
+    if(!online||!state?.pose_current||!loadedMapView()||!Number.isFinite(state?.pose?.z)){message('当前地图没有新鲜高度估计；请手动填写 Z。');return}
     $('initialZ').value=state.pose.z.toFixed(3);
+    message('已保留当前地图的估计高度，不代表已确认实际楼层；确认位置后提交手动标定。');
   };
   const down=canvas.onpointerdown;
   canvas.onpointerdown=e=>{

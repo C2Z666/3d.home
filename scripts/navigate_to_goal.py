@@ -10,6 +10,7 @@ from body_planner import plan_body,departure_heading
 from concurrent.futures import ThreadPoolExecutor
 from mission_runtime import RecoveryBudget, MissionTrace
 from terminal_feedback import TerminalApproach, TerminalYaw
+from turn_recovery import TurnWait
 from navigation_control import HeadingAlignment, MotionGuard, swept_rotation_clearance, quaternion_yaw, wrap, initial_path_heading, scan_input_state, POSITION_TOLERANCE, POSITION_RELEASE, replan_errors, settled_goal_action, SettledGoalReview, RECOVERABLE_INPUT_PHASES
 
 MAX_LINEAR_SPEED = 0.30
@@ -78,6 +79,10 @@ def main():
   values=approved.get('poses',[])
   if not values or not all(all(isinstance(v.get(k),(float,int)) and math.isfinite(v[k]) for k in ('x','y','yaw')) for v in values):p.error('invalid approved path')
   if math.hypot(values[-1]['x']-target['x'],values[-1]['y']-target['y'])>.001:p.error('path endpoint does not match goal')
+ # Every entry point, including post-stair segments without a saved preview,
+ # uses the same certified FollowPath pipeline.
+ auto_plan=approved is None
+ if auto_plan:approved={'generated':True,'poses':[]}
  from scene_registry import scene_bundle
  from site_identity import verify
  scene=scene_bundle(root,args.scene)
@@ -96,7 +101,7 @@ def main():
  from geometry_msgs.msg import PoseStamped,Twist
  from nav_msgs.msg import Odometry,OccupancyGrid
  from sensor_msgs.msg import LaserScan
- from nav2_msgs.action import NavigateToPose,FollowPath,ComputePathToPose
+ from nav2_msgs.action import FollowPath,ComputePathToPose
  from nav2_msgs.srv import GetCostmap
  from nav_msgs.msg import Path as NavPath
  from std_msgs.msg import String
@@ -113,7 +118,7 @@ def main():
  signal.signal(signal.SIGINT,on_signal); signal.signal(signal.SIGTERM,on_signal)
  vel=n.create_publisher(Twist,'/d1/sdk/supervised_cmd_vel',1)
  action=n.create_publisher(String,'/d1/sdk/d1_action',1)
- client=ActionClient(n,FollowPath if approved else NavigateToPose,'/follow_path' if approved else '/navigate_to_pose')
+ client=ActionClient(n,FollowPath,'/follow_path')
  planner=ActionClient(n,ComputePathToPose,'/compute_path_to_pose')
  route_costmap=n.create_client(GetCostmap,'/global_costmap/get_costmap')
  body_executor=ThreadPoolExecutor(max_workers=1);body_future=None;body_repaired=False;body_force=False
@@ -134,6 +139,7 @@ def main():
  reacquire_count=0; planner_goal=None; planner_reply=None; planner_result=None
  route_reply=None; paused_state=None; stable_since=None; paused_sequence=None; paused_stamp=None; paused_at=None
  next_turn_check_log=0.
+ turn_wait=None; turn_replan_route=False
  budget=RecoveryBudget();pause_category='data';next_sample=0.;last_sent=(0.,0.);raw_lio=None;raw_lio_at=-math.inf
  task_id=args.path_file.name.removesuffix('.path.json') if args.path_file else 'cli-'+str(os.getpid())
  trace=MissionTrace(root/'work/navigation',task_id)
@@ -282,7 +288,7 @@ def main():
    pending_message.path.header.stamp=stamp
    for point in pending_message.path.poses:point.header.stamp=stamp
   else:pending_message.pose.header.stamp=stamp
-  print('[TRACK_PATH] 提交%s路线给DWB。' % ('终点复核后重新规划的' if reacquire_count else '已确认的预览'),flush=True)
+  print('[TRACK_PATH] 提交%s路线给DWB。' % ('现场生成并通过机身检查的' if auto_plan else '终点复核后重新规划的' if reacquire_count else '已确认的预览'),flush=True)
   if approved:trace.set_route([[p.pose.position.x,p.pose.position.y] for p in pending_message.path.poses],map_id,args.scene)
   route_reply=client.send_goal_async(pending_message);route_reply.add_done_callback(accepted)
  def request_route_check(now):
@@ -345,7 +351,7 @@ def main():
   pos=current_pose();points=[dict(x=p.pose.position.x,y=p.pose.position.y) for p in pending_message.path.poses] if approved else []
   heading=departure_heading([[p['x'],p['y']] for p in points],pos) if approved else pos[2]
   deadline=execution_deadline
-  if math.hypot(pos[0]-target['x'],pos[1]-target['y'])<=.25:
+  if not turn_replan_route and math.hypot(pos[0]-target['x'],pos[1]-target['y'])<=.25:
    alignment=None;terminal=True;transition('STOPPING');deadline=min(execution_deadline,time.monotonic()+10);halt_at=time.monotonic();zero()
   elif abs(wrap(heading-pos[2]))>.35:
    alignment=begin_alignment(pos,[pos[0],pos[1],heading],time.monotonic(),current_odom(),check_goal_position=False)
@@ -536,6 +542,8 @@ def main():
       transition(paused_state)
       if state in ('ALIGN_PATH','ALIGN_YAW'):
        alignment.started+=now-paused_at;alignment.progress_at+=now-paused_at
+      if state=='TERMINAL_APPROACH' and terminal_approach is not None:
+       terminal_approach.resume_after_pause(now-paused_at)
       if state in ('STOPPING','REACQUIRE_STOP'):halt_at=now;deadline=min(execution_deadline,now+10);stop_sequences.clear()
       if state in ('REPLAN','ROUTE_CHECK'):deadline=min(execution_deadline,now+10)
       if state=='OBSTACLE_WAIT':deadline=min(execution_deadline,now+20)
@@ -569,26 +577,26 @@ def main():
     if not client.server_is_ready(): continue
     if approved and not route_costmap.service_is_ready():continue
     if approved:
-     bound=approved['plan']
-     if (loc.get('map_id'),loc.get('session'),loc.get('epoch'))!=(bound['map_id'],bound['localization_session'],bound['localization_epoch']):fault('[STALE_PLAN] 规划后定位身份改变');continue
-     q=pose.pose.orientation;current_yaw=math.atan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z))
-     yaw_change=math.atan2(math.sin(current_yaw-bound['start']['yaw']),math.cos(current_yaw-bound['start']['yaw']))
-     if math.hypot(pose.pose.position.x-bound['start']['x'],pose.pose.position.y-bound['start']['y'])>.15 or abs(yaw_change)>.25:fault('[STALE_PLAN] 准备期间起点或朝向变化，请重新规划');continue
+     if not auto_plan:
+      bound=approved['plan']
+      if (loc.get('map_id'),loc.get('session'),loc.get('epoch'))!=(bound['map_id'],bound['localization_session'],bound['localization_epoch']):fault('[STALE_PLAN] 规划后定位身份改变');continue
+      q=pose.pose.orientation;current_yaw=math.atan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z))
+      yaw_change=math.atan2(math.sin(current_yaw-bound['start']['yaw']),math.cos(current_yaw-bound['start']['yaw']))
+      if math.hypot(pose.pose.position.x-bound['start']['x'],pose.pose.position.y-bound['start']['y'])>.15 or abs(yaw_change)>.25:fault('[STALE_PLAN] 准备期间起点或朝向变化，请重新规划');continue
+     else:
+      pos=current_pose()
+      approved['poses']=[dict(x=pos[0],y=pos[1],yaw=pos[2]),dict(x=target['x'],y=target['y'],yaw=target['yaw'])]
      message=FollowPath.Goal();message.path=NavPath();message.path.header.frame_id='map';message.path.header.stamp=n.get_clock().now().to_msg()
      for v in approved['poses']:
       pnt=PoseStamped();pnt.header=message.path.header;pnt.pose.position.x=float(v['x']);pnt.pose.position.y=float(v['y']);pnt.pose.orientation.z=math.sin(v['yaw']/2);pnt.pose.orientation.w=math.cos(v['yaw']/2);message.path.poses.append(pnt)
      message.path.poses[-1].pose.orientation.z=math.sin(target['yaw']/2);message.path.poses[-1].pose.orientation.w=math.cos(target['yaw']/2)
      message.controller_id='FollowPath';message.goal_checker_id='goal_checker'
-     print('[PATH] 使用已确认的预览路线，共 %d 个点；终点朝向 %.4f rad' % (len(message.path.poses),target['yaw']),flush=True)
-    else:
-     message=NavigateToPose.Goal(); message.pose=PoseStamped(); message.pose.header.frame_id='map'; message.pose.header.stamp=n.get_clock().now().to_msg()
-     message.pose.pose.position.x=target['x']; message.pose.pose.position.y=target['y']
-     message.pose.pose.orientation.z=math.sin(target['yaw']/2); message.pose.pose.orientation.w=math.cos(target['yaw']/2)
-     message.behavior_tree=str(root/'config/navigate.xml')
+     if auto_plan:print('[PATH] 无预览文件，先按当前楼层地图生成并认证完整机身路线；保持零速。',flush=True)
+     else:print('[PATH] 使用已确认的预览路线，共 %d 个点；终点朝向 %.4f rad' % (len(message.path.poses),target['yaw']),flush=True)
     pending_message=message
     execution_started=now; execution_deadline=now+args.max_runtime; next_countdown=now+5; deadline=execution_deadline
     print('[START] Walk 已稳定确认%s；最大运行时间 %.1fs，剩余 %.1fs；到时自动终止并停止速度发布。' % ('，未重复发送 standup' if walk_gate.request_before is None else '',args.max_runtime,args.max_runtime),flush=True)
-    queue_route_check('prepare')
+    queue_route_check('prepare',force_plan=auto_plan)
    elif state=='ROUTE_CHECK':
     zero()
     valid=poll_route_check(now)
@@ -608,6 +616,21 @@ def main():
     if not stopped() or not costmap_fresh(now):stop_sequences.clear();continue
     stop_sequences.add(sdk.get('state_sequence'))
     if len(stop_sequences)<2 or now-obstacle_at<.7:continue
+    if turn_wait is not None:
+     if now<turn_wait.next_check:continue
+     turn_wait.next_check=now+.25
+     blocked=turn_clear(now)
+     decision=turn_wait.update(now,bool(blocked),True)
+     if decision=='WAIT':continue
+     if decision=='RESUME':
+      previous=turn_wait.phase
+      alignment=begin_alignment(current_pose(),turn_wait.target,now,current_odom(),check_goal_position=previous=='ALIGN_YAW')
+      turn_wait=None;obstacle_force_replan=False;replan_policy.since=None;motion_guard.reset()
+      transition(previous,'[TURN_CLEARED] 障碍已消退，矩形转向检查连续通过，恢复转向')
+      deadline=execution_deadline;align_halt_at=None;continue
+     turn_wait=None;turn_replan_route=True
+     yaw_priority_latched=False;terminal_started=None;approach_attempted=False
+     print('[TURN_REPLAN] 转向持续受阻，重新搜索包含终点朝向的可执行路线；不会原地强转。',flush=True)
     if route_future is None and now>=route_next_check:request_route_check(now)
     checked=poll_route_check(now)
     if checked is None and route_future is not None:continue
@@ -624,7 +647,7 @@ def main():
    elif state in ('NAVIGATE','ACCEPT'):
     if sdk.get('motion')!='Walk' or sdk.get('motion_pending') is not False: fault('Walk mode lost'); continue
     pos=current_pose()
-    if state=='NAVIGATE' and math.hypot(pos[0]-target['x'],pos[1]-target['y'])<=.25:
+    if state=='NAVIGATE' and not turn_replan_route and math.hypot(pos[0]-target['x'],pos[1]-target['y'])<=.25:
      zero()
      if goal and not (result and result.done()):goal.cancel_goal_async()
      terminal=bool(result and result.done());alignment=None;raw=None;raw_at=-math.inf
@@ -698,7 +721,10 @@ def main():
      print('[STOPPING] 已进入朝向容差或提前制动；保持零速，停稳后分别复核位置与朝向。',flush=True)
      transition('STOPPING');deadline=min(execution_deadline,now+10);halt_at=now;stop_sequences.clear();settled_review.reset();zero();continue
     reason=turn_clear(now)
-    if reason:fault('[TURN_CLEARANCE] '+reason);continue
+    if reason:
+     turn_wait=TurnWait(state,alignment.target,now)
+     obstacle_hold('[TURN_BLOCKED] '+reason,now,force=True)
+     continue
     align_halt_at=None
     output(0.,wz,now)
    elif state=='TERMINAL_APPROACH':
@@ -775,12 +801,9 @@ def main():
     stop_sequences.add(sdk.get('state_sequence'))
     if len(stop_sequences)<2:continue
     pos=current_pose()
-    if math.hypot(pos[0]-target['x'],pos[1]-target['y'])<=POSITION_TOLERANCE:
+    if not turn_replan_route and math.hypot(pos[0]-target['x'],pos[1]-target['y'])<=POSITION_TOLERANCE:
      alignment=begin_alignment(pos,[target['x'],target['y'],target['yaw']],now,current_odom())
      transition('ALIGN_YAW');deadline=execution_deadline;continue
-    if not approved:
-     # NavigateToPose owns planning in this optional CLI mode.
-     result=None;goal=None;terminal=False;deadline=execution_deadline;submit_route();continue
     result=None;goal=None;terminal=False;deadline=execution_deadline;alignment=None
     print('[REPLAN] 已停稳，按当前地图搜索机身及转向均可通过的绕行路线。',flush=True)
     queue_route_check('prepare',force_plan=True)

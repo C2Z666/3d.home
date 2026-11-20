@@ -18,6 +18,10 @@ from rclpy.qos import qos_profile_sensor_data
 
 def main():
     cancel_test='--cancel' in sys.argv
+    drift_test='--yaw-drift' in sys.argv
+    stall_test='--raw-stall' in sys.argv
+    jump_test='--raw-jump' in sys.argv
+    fault_test=stall_test or jump_test
     folder=Path(tempfile.mkdtemp(prefix='mission_sim_',dir=ROOT/'work'))
     shutil.copytree(ROOT/'scripts',folder/'scripts');shutil.copytree(ROOT/'config',folder/'config')
     (folder/'work/navigation').mkdir(parents=True)
@@ -25,6 +29,7 @@ def main():
     c=config['connections'][0];c['entry']=dict(x=0.,y=0.,yaw=0.)
     c['exit']=None if '--unmarked' in sys.argv else dict(floor_id='floor2',x=.7,y=0.,yaw=0.)
     c['preview_exit']=c['exit']
+    c['arrival_line']=None if '--unmarked' in sys.argv else dict(floor_id='floor2',x=.7,y=0.,yaw=0.,half_width_m=.6)
     c['completion'].update(min_rise_m=.2,min_forward_m=.2,stable_sec=.3,level_travel_m=.1)
     (folder/'config/floor_connections.yaml').write_text(yaml.safe_dump(config))
     (folder/'scripts/scene_registry.py').write_text("def scene_bundle(root,name):return {'map_id':'d1_hall_100832_hall_clean','maps':{'lower':{},'upper':{}}}\n")
@@ -43,15 +48,17 @@ def main():
     state=dict(motion='Walk',motion_pending=False,pose_request_id=0,pose_confirmed_id=0,
                state_sequence=0,safety_epoch=0,bridge_session='fake',sdk_connected=True,control_held=True,
                state_fresh=True,soft_stop=False,hardware_stop=False,command_zero=True,
-               reported_forward_speed=0.,reported_lateral_speed=0.,reported_yaw_rate=0.,stair_speed_cap=.5,stair_fault=False)
-    commanded=0.;command_at=permit_at=-math.inf;allowed=False;actions=[]
+               reported_forward_speed=0.,reported_lateral_speed=0.,reported_yaw_rate=0.,stair_speed_cap=.5,stair_yaw_rate_cap=.05,stair_fault=False)
+    commanded=0.;turn=0.;turn_commands=[];command_at=permit_at=-math.inf;allowed=False;actions=[]
     def action(m):
         actions.append(m.data);state['motion']='Stair' if m.data=='stair' else 'Walk'
         state['pose_request_id']+=1;state['pose_confirmed_id']=state['pose_request_id']
     def velocity(m):
-        nonlocal commanded,command_at
+        nonlocal commanded,command_at,turn
         commanded=m.linear.x;command_at=time.monotonic()
-        assert m.angular.z==0.,'Straight stair must not turn'
+        turn=m.angular.z;turn_commands.append(turn)
+        assert abs(turn)<=.05+1e-9,'Stair turn exceeds cap'
+        if not drift_test:assert abs(turn)<1e-7,'No heading error should not turn'
     def permission(m):
         nonlocal allowed,permit_at
         allowed=m.data;permit_at=time.monotonic()
@@ -61,23 +68,28 @@ def main():
     log=(folder/'mission.log').open('w')
     proc=subprocess.Popen([sys.executable,str(folder/'scripts/multifloor_mission.py'),'--live','--path-file',str(route),'--max-runtime','30','--owner-pid',str(os.getpid())],stdout=log,stderr=subprocess.STDOUT,env=os.environ.copy())
     C=np.eye(4);C[:3,:3]=LIO_TO_NAV;I_B=imu_from_base(folder/'config/calibration.yaml')
-    x=0.;z=0.;previous=time.monotonic();saw_locked=False;cancel_sent=False
+    x=0.;z=0.;yaw=0.;injected=False;frozen_stamp=None;previous=time.monotonic();saw_locked=False;cancel_sent=False
     try:
         end=time.monotonic()+35
         while proc.poll() is None and time.monotonic()<end:
             rclpy.spin_once(n,timeout_sec=.01);now=time.monotonic();dt=min(.05,now-previous);previous=now
             speed=commanded if allowed and now-permit_at<.3 and now-command_at<.3 and state['motion']=='Stair' else 0.
             x+=speed*dt;z=min(.25,x*.5)
+            if speed>0:yaw+=turn*dt
+            if drift_test and x>.1 and not injected:yaw+=.12;injected=True
             if cancel_test and x>.05 and not cancel_sent:
                 proc.send_signal(signal.SIGINT);cancel_sent=True
-            stamp=n.get_clock().now().to_msg();T=np.eye(4);T[:3,3]=[x,0,z]
+            stamp=n.get_clock().now().to_msg();T=np.eye(4);T[:3,3]=[x+(1. if jump_test and x>.1 else 0.),0,z];T[:3,:3]=Rotation.from_euler('z',yaw).as_matrix()
             raw=np.linalg.inv(C)@T@np.linalg.inv(I_B);q=Rotation.from_matrix(raw[:3,:3]).as_quat()
             od=Odometry();od.header.frame_id='d1_lio_init';od.child_frame_id='d1_imu';od.header.stamp=stamp
+            if stall_test and x>.1:
+                if frozen_stamp is None:frozen_stamp=stamp
+                od.header.stamp=frozen_stamp
             od.pose.pose.position.x,od.pose.pose.position.y,od.pose.pose.position.z=map(float,raw[:3,3])
             od.pose.pose.orientation.x,od.pose.pose.orientation.y,od.pose.pose.orientation.z,od.pose.pose.orientation.w=map(float,q)
             pubs['raw'].publish(od)
-            ps=PoseStamped();ps.header.frame_id='map';ps.header.stamp=stamp;ps.pose.position.x=x;ps.pose.position.z=z;ps.pose.orientation.w=1.;pubs['pose'].publish(ps)
-            state['state_sequence']+=1;state['command_zero']=speed==0.;state['reported_forward_speed']=speed
+            ps=PoseStamped();ps.header.frame_id='map';ps.header.stamp=stamp;ps.pose.position.x=x;ps.pose.position.z=z;ps.pose.orientation.z=math.sin(yaw/2);ps.pose.orientation.w=math.cos(yaw/2);pubs['pose'].publish(ps)
+            state['state_sequence']+=1;state['command_zero']=speed==0.;state['reported_forward_speed']=speed;state['reported_yaw_rate']=turn if speed else 0.
             pubs['sdk'].publish(String(data=json.dumps(state)))
             pubs['loc'].publish(String(data=json.dumps(dict(session='test',epoch=0,map_id=config['map_id'],ready=True,tracking_valid=True))))
             if (folder/'work/navigation_mission.lock').exists():
@@ -86,15 +98,17 @@ def main():
                     except BlockingIOError:saw_locked=True
             time.sleep(.025)
         if proc.poll() is None:raise AssertionError('mission timeout')
-        log.flush();assert proc.returncode==(130 if cancel_test else 0),(folder/'mission.log').read_text()
+        log.flush();assert proc.returncode==(130 if cancel_test else 1 if fault_test else 0),(folder/'mission.log').read_text()
+        if drift_test:assert min(turn_commands)<-.01 and abs(yaw)<.12,(yaw,turn_commands)
         calls=[json.loads(line) for line in (folder/'work/flat_calls.jsonl').read_text().splitlines()]
-        assert [c['--floor'] for c in calls]==(['floor1'] if cancel_test else ['floor1','floor2']),calls
-        assert actions==(['stair'] if cancel_test else ['stair','standup']),actions
+        assert [c['--floor'] for c in calls]==(['floor1'] if cancel_test or fault_test else ['floor1','floor2']),calls
+        assert actions==(['stair'] if cancel_test or fault_test else ['stair','standup']),actions
         final=json.loads((folder/'work/floor_state.json').read_text())
-        if cancel_test:assert final['actual_floor'] is None and final['phase']=='CANCELED',final
+        if fault_test:assert final['actual_floor'] is None and final['phase']=='FAULT',final
+        elif cancel_test:assert final['actual_floor'] is None and final['phase']=='CANCELED',final
         else:assert final['actual_floor']=='floor2' and final['active_nav_floor']=='floor2' and final['phase']=='ON_FLOOR',final
         assert saw_locked
-        print('PASS: complete isolated mission, floor1 approach -> Stair -> landing stop -> Walk -> floor2 goal; no automatic trigger on ordinary navigation')
+        print('PASS:', 'fault stop without Walk transition' if fault_test else 'operator cancellation' if cancel_test else 'heading correction and landing' if drift_test else 'floor1 approach -> Stair -> landing stop -> Walk -> floor2 goal')
         print('LOG',folder/'mission.log')
     finally:
         if proc.poll() is None:

@@ -36,7 +36,7 @@ def install(root,name):
     atomic(root/'assets/output/demo/visual_map.npz',(root/v['visual_map']).read_bytes())
     atomic(root/'config/calibration.yaml',(root/v['calibration']).read_bytes())
     maps={}
-    # lower is the active navigation floor. Additional floors are display-only.
+    # Map activation starts Nav2 on lower; floor state must use that same map.
     for floor,m in v['maps'].items():
         meta=yaml.safe_load((root/m['yaml']).read_text());meta['image']=floor+'.pgm'
         atomic(root/f'maps/{floor}.pgm',(root/m['image']).read_bytes())
@@ -53,15 +53,19 @@ def install(root,name):
     atomic(root/'config/site_identity.json',json.dumps(identity,indent=2).encode())
     c=catalog(root);c['active']=name
     atomic(root/'config/map_versions.json',json.dumps(c,ensure_ascii=False,indent=2).encode())
+    from floor_routes import load_registry, reset_map_activation
+    reset_map_activation(root, load_registry(root, scenes['scenes']['old']))
 
 def request(root,name,navigation,preview):
     import subprocess, sys
     root=Path(root)
     with navigation.lock:
         if navigation.snapshot().get('active'):raise ValueError('请先结束导航再切换地图')
-        if preview.node.get_publishers_info_by_topic('/d1/sdk/supervised_cmd_vel'):raise ValueError('存在速度发布者，不能切换地图')
+        for topic in ('/d1/sdk/supervised_cmd_vel','/d1/sdk/stair_cmd_vel'):
+            if preview.node.get_publishers_info_by_topic(topic):raise ValueError('存在速度发布者，不能切换地图')
         snap=preview.snapshot()
         if snap.get('sdk_age',99)>1 or snap.get('sdk',{}).get('command_zero') is not True:raise ValueError('需要新鲜的零速度指令状态才能切换')
+        if snap.get('sdk',{}).get('motion')!='Walk' or snap.get('sdk',{}).get('motion_pending') is not False:raise ValueError('请先恢复 Walk 并等待步态切换完成，再启用地图')
         if name not in catalog(root)['versions']:raise ValueError('未知地图版本')
         if catalog(root)['versions'][name].get('navigation_enabled',True) is False:raise ValueError('此地图包当前仅用于查看，尚未完成导航配置')
         pending=root/'work/map_switch.pending'

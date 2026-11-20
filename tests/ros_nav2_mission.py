@@ -141,7 +141,7 @@ def step():
 console=(W/'nav2.log').open('w');launch=subprocess.Popen(['ros2','launch',str(R/'scripts/nav2_bringup.launch.py')],stdout=console,stderr=subprocess.STDOUT,start_new_session=True)
 process=None;reports={}
 try:
- clients={name:n.create_client(GetState,'/'+name+'/get_state') for name in ('map_server','planner_server','controller_server','velocity_smoother','bt_navigator')};active=set();pending={}
+ clients={name:n.create_client(GetState,'/'+name+'/get_state') for name in ('map_server','planner_server','controller_server','velocity_smoother','bt_navigator')};active=set();pending={};pending_at={}
  end=time.monotonic()+35
  while time.monotonic()<end and len(active)<5:
   if launch.poll() is not None:raise AssertionError('launch exited: '+(W/'nav2.log').read_text()[-6000:])
@@ -152,7 +152,10 @@ try:
     if pending[name].done():
      if pending[name].result().current_state.id==3:active.add(name)
      del pending[name]
-   elif client.service_is_ready():pending[name]=client.call_async(GetState.Request())
+    elif time.monotonic()-pending_at[name]>2.:
+     client.remove_pending_request(pending[name]);del pending[name]
+   elif client.service_is_ready():
+    pending[name]=client.call_async(GetState.Request());pending_at[name]=time.monotonic()
  if len(active)<5:raise AssertionError('Nav2 not active '+repr(active)+' '+(W/'nav2.log').read_text()[-8000:])
  reports['nav2_lifecycle_active']=sorted(active)
  if os.environ.get('D1_TEMPORAL_TEST')=='1':
@@ -165,13 +168,15 @@ try:
    while not f.done() and time.monotonic()<until:step()
    assert f.done();g=f.result().map;d=np.array(g.data).reshape(g.metadata.size_y,g.metadata.size_x)
    col=int((1.2-g.metadata.origin.position.x)/g.metadata.resolution);row=int((0.-g.metadata.origin.position.y)/g.metadata.resolution)
-   value=int(d[row-1:row+2,col-1:col+2].max());inflation=int(d[row,col+5]);evidence[label]=dict(obstacle=value,inflation=inflation)
+   value=int(d[row-1:row+2,col-1:col+2].max());inflation=int(d[row,col+3]);evidence[label]=dict(obstacle=value,inflation=inflation)
    assert value==expected,(label,value,expected)
    assert (inflation>0)==(expected==254),(label,'inflation',inflation)
    assert int(d[0,0])==254,'Static wall was erased'
+   assert int(d[row,col+7])==0,'Dynamic inflation extends past 0.25m'
+   assert int(d[120,7])>0,'Static wall lost 0.4m inflation'
   temporal_stage='present';check_temporal('present_for_12s',254,12.)
-  temporal_stage='absent';check_temporal('absent_for_5s',254,5.)
-  check_temporal('absent_for_11s',0,6.)
+  temporal_stage='absent';check_temporal('absent_for_0_5s',254,.5)
+  check_temporal('absent_for_3s',0,2.5)
   temporal_stage='present';check_temporal('reappeared',254,1.)
   temporal_stage='dropout';check_temporal('dropout_12s_retains',254,12.)
   temporal_stage='absent';check_temporal('recovered_fresh_empty',0,1.5)
@@ -225,7 +230,8 @@ try:
    for t in np.linspace(0.,1.,max(2,int(math.hypot(b[0]-a[0],b[1]-a[1])/.025))):
     points.append(dict(x=float(a[0]+t*(b[0]-a[0])),y=float(a[1]+t*(b[1]-a[1])),yaw=math.atan2(b[1]-a[1],b[0]-a[0])))
   route.write_text(json.dumps(dict(plan=dict(map_id='synthetic_navigation',localization_session='synthetic_localizer',localization_epoch=0,start=dict(x=0.,y=0.,yaw=0.)),poses=points)))
-  args+=['--path-file',str(route)]
+  # Post-stair navigation has no saved preview: exercise that actual entry point.
+  if case!='goal_reached':args+=['--path-file',str(route)]
   logfile=(W/(case+'.log')).open('w');process=subprocess.Popen([sys.executable,str(R/'scripts/navigate_to_goal.py')]+args,stdin=subprocess.PIPE,stdout=logfile,stderr=subprocess.STDOUT,text=True)
   start=time.monotonic();case_start=start;loss_at=None;timeout_seen=None;cancel_at=None
   while time.monotonic()-start<runtime+10 and process.poll() is None:
@@ -263,17 +269,20 @@ try:
    assert process.returncode!=0 and marker in log,log
    assert time.monotonic()-start<9.,log
   elif case in ('tf_loss','turn_obstacle'):
-   marker='INPUT_PAUSE' if case=='tf_loss' else 'TURN_CLEARANCE'
+   marker='INPUT_PAUSE' if case=='tf_loss' else 'TURN_BLOCKED'
    assert process.returncode!=0 and marker in log,log
   elif case=='operator_cancel':
    assert process.returncode==130 and cancel_at is not None,log
    assert not any(v[1]>cancel_at+.3 for v in casecmd),casecmd
   else:
    assert process.returncode==0,(log,x,y,raw_count,len(casecmd),actions)
-   assert math.hypot(x+map_dx-target_x,y-target_y)<(.35 if case=='terminal_shift' else .20) and abs(math.atan2(math.sin(yaw-target_yaw),math.cos(yaw-target_yaw)))<.13,(x,y,yaw,log)
+   assert math.hypot(x+map_dx-target_x,y-target_y)<(.35 if case in ('terminal_shift','goal_reached') else .20) and abs(math.atan2(math.sin(yaw-target_yaw),math.cos(yaw-target_yaw)))<.13,(x,y,yaw,log)
    assert bool(casecmd),'Nav2 never forwarded a moving command'
    assert 'DONE: goal reached and stopped' in log,log
    if case=='approved_turn':assert '[ALIGN_PATH]' not in log,log
+   if case=='goal_reached':
+    assert '[BODY_REPLAN]' in log and '[REPLAN_READY]' in log,log
+    assert log.index('[REPLAN_READY]')<log.index('[TRACK_PATH]'),log
    if case=='approved_path':assert '[PATH_RELEASED]' in log,log
    if case=='dynamic_clear':assert '[OBSTACLE_WAIT]' in log and ('[REPLAN_READY]' in log or '[OBSTACLE_CLEARED]' in log),log
    if case=='visual_shift_turn':assert abs(map_dx)>.12 and '[ALIGN_METRICS]' in log,log

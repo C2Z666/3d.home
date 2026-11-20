@@ -7,5 +7,5 @@ source "$ROOT/scripts/env_live.sh"
 source "$ROOT/install/setup.bash"
 exec ros2 run d1_host_control d1_bridge --ros-args -r __ns:=/d1/sdk \
  -r cmd_vel:=supervised_cmd_vel -p "robot_ip:=$1" \
- -p max_lin_vel:=0.30 -p max_ang_vel:=0.4 -p stair_max_lin_vel:=0.5 \
+ -p max_lin_vel:=0.30 -p max_ang_vel:=0.4 -p stair_max_lin_vel:=0.5 -p stair_max_ang_vel:=0.05 -p stair_max_ang_accel:=0.1 \
  -p max_lin_accel:=0.5 -p max_ang_accel:=1.0 -p watchdog_timeout:=0.3 -p trace_control:=true

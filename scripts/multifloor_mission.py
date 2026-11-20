@@ -8,6 +8,8 @@ from scipy.spatial.transform import Rotation
 from floor_routes import load_registry, read_state, write_state
 from geometry import pose_matrix, imu_from_base, navigation_pose
 from stair_completion import LandingDetector
+from landing_line import bind_arrival_line
+from stair_monitor import StairMonitor, StairMonitorFault, monitor_config, wrap
 
 
 def main():
@@ -137,6 +139,8 @@ def main():
         if read_state(root,registry)['actual_floor']!=mission['source_floor']:raise RuntimeError('出发楼层已变化')
         for c in mission['connections']:
             if s.get('stair_speed_cap',0)<c['control']['cruise_speed']:raise RuntimeError('桥接楼梯速度上限不足')
+            if c['control']['heading_correction'] and s.get('stair_yaw_rate_cap',0)<monitor_config(c)['max_yaw_rate']:
+                raise RuntimeError('桥接不支持配置的楼梯航向纠偏上限')
         print('[START] 跨楼层任务开始，总时限包含平地、上楼与停稳。',flush=True)
         for index,c in enumerate(mission['connections']):
             connection=c
@@ -155,8 +159,17 @@ def main():
                 raise RuntimeError('预备点位置或朝向复核未通过')
             mode('stair','Stair')
             write_state(root,registry,actual_floor=None,phase='STAIR',from_floor=c['from_floor'],to_floor=c['to_floor'])
-            event('STAIR','Stair 已确认，直线上楼；未启用转向纠偏')
-            detector=LandingDetector(c);origin=dict(fresh('raw'));detector.origin=origin
+            # Freeze the calibrated map heading in continuous LIO odometry ONCE.
+            # Match raw yaw to the map pose timestamp; never follow later map yaw corrections.
+            aligned_pose=fresh('pose');origin=dict(fresh('raw'))
+            reference_sample=min(list(raw_rows),key=lambda r:abs(r['stamp']-aligned_pose['stamp']))
+            if abs(reference_sample['stamp']-aligned_pose['stamp'])>.10:
+                raise RuntimeError('预备点地图与里程计时间未对齐，不能建立楼梯方向基准')
+            reference_yaw=wrap(reference_sample['yaw']+wrap(c['entry']['yaw']-aligned_pose['yaw']))
+            monitor=StairMonitor(c,origin,reference_yaw)
+            event('STAIR','固定FAST-LIO方向上楼，启用限幅航向监控',reference_yaw=reference_yaw,heading_correction=c['control']['heading_correction'])
+            detector=LandingDetector(c);detector.origin=origin;detector.reference_yaw=reference_yaw
+            detector.line=bind_arrival_line(c,aligned_pose,reference_sample,origin)
             last_print=0.;began=time.monotonic();ctl=c['control'];candidate_since=None
             while True:
                 check();s=sdk_safe();sample=dict(fresh('raw'));loc=fresh('loc')
@@ -165,30 +178,26 @@ def main():
                 if s['motion']!='Stair' or s.get('motion_pending') is not False or s.get('stair_fault') is True:raise RuntimeError('Stair 模式丢失')
                 if n.count_publishers('/d1/sdk/stair_cmd_vel')>1 or n.count_publishers('/d1/sdk/supervised_cmd_vel'):
                     raise RuntimeError('楼梯段出现其他运动发布者')
-                dx,dy=sample['x']-origin['x'],sample['y']-origin['y']
-                forward=dx*math.cos(origin['yaw'])+dy*math.sin(origin['yaw'])
-                lateral=-dx*math.sin(origin['yaw'])+dy*math.cos(origin['yaw'])
-                heading=math.atan2(math.sin(sample['yaw']-origin['yaw']),math.cos(sample['yaw']-origin['yaw']))
-                if (abs(sample['roll'])>ctl['max_roll_rad'] or abs(sample['pitch'])>ctl['max_pitch_rad'] or
-                    abs(heading)>ctl['max_heading_error_rad'] or abs(lateral)>ctl['max_lateral_m']):raise RuntimeError('楼梯姿态、航向或横向偏移超过限制')
-                if time.monotonic()-began>ctl['max_runtime'] or forward>ctl['max_travel_m'] or sample['z']-origin['z']>ctl['max_rise_m']:
-                    raise RuntimeError('楼梯执行上限到达，未确认平台')
-                if forward<-.2 or sample['z']-origin['z']<-.2:raise RuntimeError('上楼出现反向或向下位移')
+                if time.monotonic()-began>ctl['max_runtime']:
+                    raise RuntimeError('楼梯执行时限到达，未确认平台')
                 sample['connection_id']=c['id']
                 try:sample['map_pose']=fresh('pose') if loc.get('ready') is True else None
                 except RuntimeError:sample['map_pose']=None
                 # Target floor evidence is never the XY coordinate alone.
-                expected_z=(c.get('exit') or {}).get('z',registry['floors'][c['to_floor']].get('base_z'))
+                expected_z=registry['floors'][c['to_floor']].get('base_z')
                 if expected_z is not None and sample['map_pose']:
                     sample['candidate_floor']=c['to_floor'] if abs(sample['map_pose']['z']-expected_z)<.3 else None
                 elif detector.evidence.get('posture_pass'):
                     sample['candidate_floor']=c['to_floor']
                 finished=detector.update(sample)
+                base_speed=ctl['landing_speed'] if detector.evidence.get('posture_pass') else ctl['cruise_speed']
+                velocity_value,yaw_value,heading_evidence=monitor.update(sample,base_speed)
+                if heading_evidence.get('forward_m',0)>ctl['max_travel_m'] or heading_evidence.get('rise_m',0)>ctl['max_rise_m']:
+                    raise RuntimeError('楼梯距离或高度上限到达，未确认平台')
                 if finished:break
-                velocity_value=ctl['landing_speed'] if detector.ascended and detector.evidence.get('level') else ctl['cruise_speed']
-                permit.publish(Bool(data=True));command=Twist();command.linear.x=velocity_value;velocity.publish(command)
+                permit.publish(Bool(data=True));command=Twist();command.linear.x=velocity_value;command.angular.z=yaw_value;velocity.publish(command)
                 if time.monotonic()-last_print>1:
-                    event('STAIR','楼梯直行监测',evidence=detector.evidence,speed=velocity_value);last_print=time.monotonic()
+                    event('STAIR','楼梯方向监控：偏航 %.1f°，横偏 %.2fm，纠偏 %.3frad/s，速度 %.2fm/s'%(math.degrees(heading_evidence.get('heading_error_rad',0)),heading_evidence.get('lateral_m',0),yaw_value,velocity_value),evidence=detector.evidence,heading_monitor=heading_evidence,speed=velocity_value);last_print=time.monotonic()
                 time.sleep(.04)
             event('LANDING_STOP','平台候选条件满足，零速复核',evidence=detector.evidence)
             zero();settle()
@@ -213,6 +222,7 @@ def main():
         return 0
     except (Exception,KeyboardInterrupt) as e:
         zero()
+        if isinstance(e,StairMonitorFault):event('STAIR_MONITOR_FAULT',str(e),heading_monitor=e.evidence)
         if child and child.poll() is None:
             child.send_signal(signal.SIGINT)
             try:child.wait(timeout=5)

@@ -107,6 +107,7 @@ global_costmap:
       always_send_full_costmap: true
       plugins:
       - static_layer
+      - static_inflation_layer
       - obstacle_layer
       - inflation_layer
       static_layer:
@@ -135,7 +136,7 @@ global_costmap:
           obstacle_min_range: 0.0
           min_obstacle_height: -0.5
           max_obstacle_height: 1.1
-          observation_persistence: 10.0
+          observation_persistence: 2.0
           expected_update_rate: 0.5
         free_rays:
           topic: /d1/nav/clearing_points
@@ -148,9 +149,13 @@ global_costmap:
           min_obstacle_height: -10.0
           max_obstacle_height: 10.0
           observation_persistence: 0.0
-      inflation_layer:
+      static_inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
         inflation_radius: 0.40
+        cost_scaling_factor: 2.0
+      inflation_layer:
+        plugin: nav2_costmap_2d::InflationLayer
+        inflation_radius: 0.25
         cost_scaling_factor: 2.0
 local_costmap:
   local_costmap:
@@ -169,6 +174,7 @@ local_costmap:
       always_send_full_costmap: true
       plugins:
       - static_layer
+      - static_inflation_layer
       - obstacle_layer
       - inflation_layer
       width: 4
@@ -195,7 +201,7 @@ local_costmap:
           obstacle_min_range: 0.0
           min_obstacle_height: -0.5
           max_obstacle_height: 1.1
-          observation_persistence: 10.0
+          observation_persistence: 2.0
           expected_update_rate: 0.5
         free_rays:
           topic: /d1/nav/clearing_points
@@ -208,9 +214,13 @@ local_costmap:
           min_obstacle_height: -10.0
           max_obstacle_height: 10.0
           observation_persistence: 0.0
-      inflation_layer:
+      static_inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
         inflation_radius: 0.40
+        cost_scaling_factor: 2.0
+      inflation_layer:
+        plugin: nav2_costmap_2d::InflationLayer
+        inflation_radius: 0.25
         cost_scaling_factor: 2.0
       static_layer:
         plugin: nav2_costmap_2d::StaticLayer

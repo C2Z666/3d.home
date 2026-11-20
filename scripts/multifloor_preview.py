@@ -40,7 +40,7 @@ class MultiFloorPreview(PreviewPlanner):
                 mission=dict(source_floor=source,target_floor=target,connections=connections,
                     transition_only=transition_only,registry_revision=registry['revision'],first_segment=original),
                 note='已规划至首个预备点；虚线仅表示楼梯连接，后续平地段到层后按实测位置规划。'+
-                     ('出口已绑定目标楼层，参与平台结束判定。' if all(c.get('exit') for c in connections) else '未标定出口不参与结束坐标判断。'))
+                     ('已配置平台到达线，需越线且水平稳定；出口星标仅作示意。' if all(c.get('arrival_line') for c in connections) else '未配置到达线的楼梯只采用爬升后的水平稳定判据。'))
             result['floor_reference_paths']=[]
             if not transition_only:
                 endpoint=connections[-1].get('preview_exit') or connections[-1].get('exit')
