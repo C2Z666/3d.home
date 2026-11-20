@@ -1,0 +1,2 @@
+# Distance along the verified route before handing off to a detour.
+replan_radius_m: 3.0

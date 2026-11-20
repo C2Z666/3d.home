@@ -16,6 +16,15 @@ def wrap(a):
     return math.atan2(math.sin(a), math.cos(a))
 
 
+def turn_drift_margin(delta):
+    """Allow up to 10 cm drift for a pivot, tapering for small heading changes."""
+    return .10 * min(1., abs(delta) / (math.pi / 4))
+
+
+class PlanningTimeout(ValueError):
+    pass
+
+
 class BodyGrid:
     def __init__(self, grid, half_length=.50, half_width=.275):
         self.r = float(grid['resolution'])
@@ -29,6 +38,7 @@ class BodyGrid:
         self.hard = self.data >= 254
         self.clearance = distance_transform_edt(np.pad(~self.hard, 1))[1:-1, 1:-1]*self.r
         self.fields = {}
+        self.blocked_evidence = {}
 
     def local(self, p):
         x, y = p[0]-self.ox, p[1]-self.oy
@@ -42,14 +52,16 @@ class BodyGrid:
     def pose_clear(self, x, y, yaw, pad=0.):
         col, row = math.floor(x/self.r), math.floor(y/self.r)
         if not (0 <= col < self.w and 0 <= row < self.h) or self.data[row, col] >= 253:
+            self.blocked_evidence=dict(kind='centre',cell=[col,row],cost=int(self.data[row,col]) if 0<=col<self.w and 0<=row<self.h else 255)
             return False
         # Fast certificate, including cell extent and subcell centre displacement.
-        if self.clearance[row, col] > self.radius+pad+2*self.r:
+        if self.clearance[row, col] > self.radius+math.sqrt(2)*pad+2*self.r:
             return True
         l, b = self.l+pad, self.b+pad
         c, s = math.cos(yaw), math.sin(yaw)
         ex, ey = abs(c)*l+abs(s)*b, abs(s)*l+abs(c)*b
         if x-ex <= 0 or y-ey <= 0 or x+ex >= self.w*self.r or y+ey >= self.h*self.r:
+            self.blocked_evidence=dict(kind="map_boundary",cost=255)
             return False
         c0, c1 = math.floor((x-ex)/self.r), math.floor((x+ex)/self.r)
         r0, r1 = math.floor((y-ey)/self.r), math.floor((y+ey)/self.r)
@@ -60,6 +72,11 @@ class BodyGrid:
         hit = ((np.abs(dx) <= ex+half) & (np.abs(dy) <= ey+half) &
                (np.abs(c*dx+s*dy) <= l+half*(abs(c)+abs(s))) &
                (np.abs(-s*dx+c*dy) <= b+half*(abs(c)+abs(s))))
+        if hit.any():
+            k=int(np.flatnonzero(hit)[0]);col=int(cc[k]+c0);row=int(rr[k]+r0)
+            local=np.array([(col+.5)*self.r,(row+.5)*self.r,0.])
+            self.blocked_evidence=dict(kind='body',cell=[col,row],cost=int(self.data[row,col]),
+                                       world=self.world(local)[:2])
         return not hit.any()
 
     def turn_clear(self, p, yaw):
@@ -67,7 +84,7 @@ class BodyGrid:
         n = max(1, math.ceil(abs(delta)/math.radians(3)))
         # Every intermediate rotated body is contained in a sampled body padded
         # by the maximum point displacement to the nearest angular sample.
-        pad = self.radius*abs(delta)/(2*n)+1e-6
+        pad = turn_drift_margin(delta)+self.radius*abs(delta)/(2*n)+1e-6
         return all(self.pose_clear(p[0], p[1], p[2]+delta*i/n, pad) for i in range(n+1))
 
     def line_clear(self, p, q, yaw):
@@ -93,7 +110,9 @@ class BodyGrid:
             # Touching a forbidden centre cell also counts as blocked.
             for epsx,epsy in ((0,0),(1e-9,1e-9),(-1e-9,-1e-9),(1e-9,-1e-9),(-1e-9,1e-9)):
                 c,r=math.floor((x+epsx)/self.r),math.floor((y+epsy)/self.r)
-                if not (0<=c<self.w and 0<=r<self.h) or self.data[r,c]>=253:return False
+                if not (0<=c<self.w and 0<=r<self.h) or self.data[r,c]>=253:
+                    self.blocked_evidence=dict(kind='centre_segment',cell=[c,r],cost=int(self.data[r,c]) if 0<=c<self.w and 0<=r<self.h else 255)
+                    return False
         return True
 
     def connect(self, p, q, final_yaw=None):
@@ -107,8 +126,8 @@ class BodyGrid:
         if key in self.fields:return self.fields[key]
         # Translation fields only prune endpoint/midpoint collisions; line_clear
         # certifies the complete edge. Do not add a circular clearance envelope.
-        pad = 0. if not turn else self.radius*math.pi/64+1e-6
-        size=math.ceil((self.radius+pad)/self.r)+2
+        pad = 0. if not turn else turn_drift_margin(math.pi/4)+self.radius*math.pi/64+1e-6
+        size=math.ceil(math.hypot(self.l+pad,self.b+pad)/self.r)+2
         yy,xx=np.mgrid[-size:size+1,-size:size+1]*self.r
         mask=np.zeros(xx.shape,bool)
         angles=[heading*math.pi/4] if not turn else np.linspace(heading*math.pi/4,(heading+1)*math.pi/4,9)
@@ -125,7 +144,10 @@ class BodyGrid:
 def remaining_points(points, current):
     p=np.asarray(points,dtype=float)
     start=int(np.argmin(np.sum((p[:,:2]-np.asarray(current[:2]))**2,axis=1)))
-    while start<len(p)-1 and np.linalg.norm(p[start,:2]-current[:2])<.03:start+=1
+    while start<len(p)-1:
+        passed=float(np.dot(np.asarray(current[:2])-p[start,:2],p[start+1,:2]-p[start,:2]))>1e-9
+        if np.linalg.norm(p[start,:2]-current[:2])<.03 or passed:start+=1
+        else:break
     return p[start:],start
 
 
@@ -140,16 +162,18 @@ def certify(points, current, grid, half_length=.50, half_width=.275, goal_yaw=No
     body=grid if isinstance(grid,BodyGrid) else BodyGrid(grid,half_length,half_width)
     cur=body.local(current)
     remaining,start=remaining_points(p,current) if trim else (p,0)
+    clear_distance=0.
     for i,v in enumerate(remaining):
         q=body.local([v[0],v[1],0.])
         if math.hypot(*(q[:2]-cur[:2]))<1e-7:continue
         if not body.connect(cur,q):
             col,row=math.floor(q[0]/body.r),math.floor(q[1]/body.r)
             cost=int(body.data[row,col]) if 0<=col<body.w and 0<=row<body.h else 255
-            return False,dict(reason='swept_body_blocked',segment=start+i,x=float(v[0]),y=float(v[1]),distance_m=float(np.linalg.norm(v[:2]-current[:2])),centre_cost=cost)
+            return False,dict(reason='swept_body_blocked',segment=start+i,x=float(v[0]),y=float(v[1]),distance_m=float(np.linalg.norm(v[:2]-current[:2])),centre_cost=cost,clear_prefix_m=clear_distance,blocked=body.blocked_evidence)
+        clear_distance+=float(np.linalg.norm(q[:2]-cur[:2]))
         cur=np.array([q[0],q[1],math.atan2(q[1]-cur[1],q[0]-cur[0])])
     if goal_yaw is not None and not body.turn_clear(cur,wrap(goal_yaw-body.angle)):
-        return False,dict(reason='goal_turn_blocked',x=float(p[-1,0]),y=float(p[-1,1]))
+        return False,dict(reason='goal_turn_blocked',x=float(p[-1,0]),y=float(p[-1,1]),clear_prefix_m=clear_distance,blocked=body.blocked_evidence)
     return True,dict(reason='swept_body_clear',checked_segments=len(p)-start,remaining_start_index=start)
 
 
@@ -184,7 +208,7 @@ def plan_body(grid, start, goal, half_length=.50, half_width=.275, timeout=8.):
             if body.connect(s,q,q[2]):push(state,math.hypot(q[0]-s[0],q[1]-s[1])+.08*abs(wrap(q[2]-s[2])),None)
     expanded=0;end=None
     while queue:
-        if time.monotonic()-begin>timeout:raise ValueError('机身约束搜索超时，未发布未经验证的路线')
+        if time.monotonic()-begin>timeout:raise PlanningTimeout('机身约束搜索超时，未发布未经验证的路线')
         _,_,cost,state=heapq.heappop(queue)
         if cost!=dist[state]:continue
         expanded+=1;c,r,h=state;q=pose(state)

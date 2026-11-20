@@ -44,9 +44,9 @@ class Repairs(unittest.TestCase):
         self.assertTrue(check_route([[0,0],[1,0],[2,0]],[1,0,0],g)[0])
 
     def test_cooldown_and_bounded_replans(self):
-        p=ReplanPolicy();p.blocked(0);self.assertFalse(p.ready(1));self.assertTrue(p.ready(1.5))
-        self.assertTrue(p.request(1.5));p.blocked(2);self.assertFalse(p.ready(3.9));self.assertTrue(p.ready(4.5))
-        for t in (4.5,7.5,10.5):self.assertTrue(p.request(t))
+        p=ReplanPolicy();p.blocked(0);self.assertFalse(p.ready(1));self.assertTrue(p.ready(3.))
+        self.assertTrue(p.request(3.));p.blocked(4);self.assertFalse(p.ready(3.9));self.assertTrue(p.ready(7.))
+        for t in (7.,10.,13.):self.assertTrue(p.request(t))
         self.assertFalse(p.request(14))
 
 if __name__=='__main__':unittest.main()

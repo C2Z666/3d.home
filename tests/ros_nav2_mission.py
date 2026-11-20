@@ -116,8 +116,8 @@ def step():
    distance=.75 if current_case=='turn_inflation' else .5
    points=[[distance*math.cos(a),distance*math.sin(a),0.] for a in np.linspace(-math.pi,math.pi,720)]
   # During the dynamic test, a temporary object blocks the forward route.
-  if current_case=='dynamic_clear' and 1.<time.monotonic()-case_start<7.:
-   dx=1.2-x;dy=-y;points=[[math.cos(yaw)*dx+math.sin(yaw)*dy,-math.sin(yaw)*dx+math.cos(yaw)*dy,0.]]
+  if current_case in ('dynamic_clear','far_dynamic') and 1.<time.monotonic()-case_start<(12. if current_case=='far_dynamic' else 7.):
+   dx=(3. if current_case=='far_dynamic' else 1.2)-x;dy=-y;points=[[math.cos(yaw)*dx+math.sin(yaw)*dy,-math.sin(yaw)*dx+math.cos(yaw)*dy,0.]]
   if current_case not in ('voxel_evidence','temporal_evidence'):pubs['marks'].publish(cloud(points))
   rays=[] if points else [[3.5*math.cos(a),3.5*math.sin(a),0.] for a in np.linspace(-math.pi,math.pi,720)]
   if current_case=='voxel_evidence':
@@ -196,7 +196,7 @@ try:
    assert value==(0 if voxel_stage=='clear' else 254),(voxel_stage,value)
    assert int(d[0,0])==254, 'Static wall must remain'
   reports['voxel_evidence']=results;n.destroy_client(cost);current_case='startup'
- for case in ('near_yaw','terminal_margin','goal_reached','localization_loss','runtime_limit','approved_path','approved_turn','behind_path','curved_path','slow_turn','turn_stall','unexpected_reverse','operator_cancel','tf_loss','turn_obstacle','visual_shift_turn','terminal_shift','tf_transient','tf_transient_turn','turn_inflation','turn_drift','turn_drift_path','motion_retry','data_retries','map_z_drift','flat_tilt_diagnostic','dynamic_clear'):
+ for case in ('far_dynamic','near_yaw','terminal_margin','goal_reached','localization_loss','runtime_limit','approved_path','approved_turn','behind_path','curved_path','slow_turn','turn_stall','unexpected_reverse','operator_cancel','tf_loss','turn_obstacle','visual_shift_turn','terminal_shift','tf_transient','tf_transient_turn','turn_inflation','turn_drift','turn_drift_path','motion_retry','data_retries','map_z_drift','flat_tilt_diagnostic','dynamic_clear'):
   if os.environ.get('D1_TEST_CASES') and case not in os.environ['D1_TEST_CASES'].split(','):continue
   margin_shifted=False;current_case=case;case_start=time.monotonic()+1000;tf_available=True;obstacle=False;x=y=yaw=0.;actual_vx=actual_wz=0.;motion='Walk';ready=True;command=Twist();request=confirmed=0;map_dx=0.;shift_enabled=False;drift_enabled=False
   # The live layer now retains observation clouds for 10s. Clearing grid
@@ -216,10 +216,10 @@ try:
    assert f.done();n.destroy_client(c)
   for _ in range(30):step()
   drift_enabled=case in ('turn_drift','turn_drift_path')
-  target_x=.02 if case=='near_yaw' else 2.0 if case=='dynamic_clear' else 3.0 if case=='data_retries' else 3. if case=='runtime_limit' else .02 if case in ('approved_turn','slow_turn','turn_stall','unexpected_reverse','turn_obstacle','tf_transient_turn','turn_inflation','turn_drift') else -.5 if case in ('behind_path','visual_shift_turn','turn_drift_path') else .65 if case=='curved_path' else .55
+  target_x=4.5 if case=='far_dynamic' else .02 if case=='near_yaw' else 2.0 if case=='dynamic_clear' else 3.0 if case=='data_retries' else 3. if case=='runtime_limit' else .02 if case in ('approved_turn','slow_turn','turn_stall','unexpected_reverse','turn_obstacle','tf_transient_turn','turn_inflation','turn_drift') else -.5 if case in ('behind_path','visual_shift_turn','turn_drift_path') else .65 if case=='curved_path' else .55
   target_y=.04 if os.environ.get('D1_TEST_WEAK_PLANT')=='1' and case=='approved_path' else .1 if case=='behind_path' else .6 if case=='curved_path' else 0.
   target_yaw=.11 if case=='near_yaw' else 2.05 if case=='terminal_margin' else 2.8 if case=='tf_transient_turn' else 2. if case=='terminal_shift' else math.pi if case in ('slow_turn','visual_shift_turn','turn_drift','turn_drift_path') else 1. if case in ('approved_turn','turn_stall','unexpected_reverse','behind_path','turn_obstacle','turn_inflation') else math.pi/2 if case=='curved_path' else 0.
-  runtime=60. if case=='terminal_margin' else 20. if case=='near_yaw' else 40. if case in ('map_z_drift','dynamic_clear','flat_tilt_diagnostic') else 40. if os.environ.get('D1_TEST_WEAK_PLANT')=='1' and case=='approved_path' else 60. if case=='data_retries' else 60. if case in ('visual_shift_turn','terminal_shift','tf_transient_turn','turn_drift','turn_drift_path') else 30. if case in ('behind_path','curved_path','slow_turn','tf_transient','motion_retry') else 20. if case in ('approved_path','approved_turn') else 10.
+  runtime=60. if case in ('terminal_margin','far_dynamic') else 20. if case=='near_yaw' else 40. if case in ('map_z_drift','dynamic_clear','flat_tilt_diagnostic') else 40. if os.environ.get('D1_TEST_WEAK_PLANT')=='1' and case=='approved_path' else 60. if case=='data_retries' else 60. if case in ('visual_shift_turn','terminal_shift','tf_transient_turn','turn_drift','turn_drift_path') else 30. if case in ('behind_path','curved_path','slow_turn','tf_transient','motion_retry') else 20. if case in ('approved_path','approved_turn') else 10.
   args=['--live','--x',str(target_x),'--y',str(target_y),'--yaw',str(target_yaw),'--max-runtime',str(runtime)]
   route=R/'work/approved_test.path.json';route.parent.mkdir(exist_ok=True)
   if case=='curved_path':
@@ -286,6 +286,7 @@ try:
     assert '[BODY_REPLAN]' in log and '[REPLAN_READY]' in log,log
     assert log.index('[REPLAN_READY]')<log.index('[TRACK_PATH]'),log
    if case=='approved_path':assert '[PATH_RELEASED]' in log,log
+   if case=='far_dynamic':assert '[DISTANT_OBSTACLE]' in log and 'DONE: goal reached and stopped' in log,log
    if case=='dynamic_clear':assert '[OBSTACLE_WAIT]' in log and ('[REPLAN_READY]' in log or '[OBSTACLE_CLEARED]' in log),log
    if case=='visual_shift_turn':assert abs(map_dx)>.12 and '[ALIGN_METRICS]' in log,log
    if case=='data_retries':
