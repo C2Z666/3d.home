@@ -75,12 +75,12 @@ def main():
   if history and t<=history[-1][0]:history.clear();clouds.clear();clear_evidence.clear()
   history.append((t,pose_matrix(m.pose.pose)@I_B))
  def cloud(m):
-  clouds.add(stamp(m.header),m)
+  clouds.add(stamp(m.header),(m,n.get_clock().now().nanoseconds))
  def tick():
   nonlocal pending,last,fault,points
   if history:pending=clouds.take(n.get_clock().now().nanoseconds*1e-9,history[0][0],history[-1][0])
   if pending is not None:
-   m=pending;t=stamp(m.header)
+   m,received_ns=pending;t=stamp(m.header);process_ns=n.get_clock().now().nanoseconds
    if m.header.frame_id!=c['cloud_frame']:fault='raw cloud frame mismatch';pending=None
    elif abs(n.get_clock().now().nanoseconds*1e-9-t)>.5:fault='stale cloud';pending=None
    elif history and t<=history[-1][0]:
@@ -113,7 +113,8 @@ def main():
      projection_info.update(source_stamp=t,near_front_count=len(selected),near_front_base=sample.round(4).tolist(),near_front_odom=paired.round(4).tolist(),assumed_base_height_m=c['base_height_m'])
      out=LaserScan();out.header.stamp=m.header.stamp;out.header.frame_id='nav_base'
      out.angle_min=-math.pi;out.angle_increment=2*math.pi/720;out.angle_max=math.pi-out.angle_increment
-     out.range_min=float(c['range_min_m']);out.range_max=float(c['range_max_m']);out.ranges=ranges.tolist();pub.publish(out)
+     out.range_min=float(c['range_min_m']);out.range_max=float(c['range_max_m']);out.ranges=ranges.tolist();publish_ns=n.get_clock().now().nanoseconds;pub.publish(out)
+     projection_info["scan_timing"]=dict(source_ns=m.header.stamp.sec*10**9+m.header.stamp.nanosec,cloud_received_ns=received_ns,process_start_ns=process_ns,publish_ns=publish_ns)
      last=time.monotonic();fault=''
     except Exception as e:fault=str(e)
   health.publish(String(data=json.dumps(dict(ready=time.monotonic()-last<.4,reason=fault,finite_input_points=points,**projection_info))))

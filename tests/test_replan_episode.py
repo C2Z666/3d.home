@@ -1,7 +1,7 @@
 import sys,unittest
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
-from route_validation import ReplanPolicy,check_route,near_obstacle_action
+from route_validation import ReplanPolicy,check_route,near_obstacle_action,ClearWindow
 from body_planner import PlanningTimeout,remaining_points
 import numpy as np,pickle
 
@@ -14,6 +14,18 @@ class Episodes(unittest.TestCase):
   self.assertEqual(near_obstacle_action(4.99,5.,False),"wait")
   self.assertEqual(near_obstacle_action(5.,5.,False),"replan")
   self.assertEqual(near_obstacle_action(5.,5.,None),"wait")
+ def test_confirm_then_new_block(self):
+  w=ClearWindow()
+  for t,stamp in [(3,10),(3.25,11)]:self.assertFalse(w.observe(t,stamp,stamp,True))
+  self.assertTrue(w.observe(3.5,12,12,True))
+  self.assertFalse(w.observe(4.,13,13,False))
+  self.assertEqual(near_obstacle_action(.5,5.,False),'wait')
+ def test_flicker_duplicate_and_gap(self):
+  w=ClearWindow()
+  for t,m,s,ok in [(0,1,1,True),(.25,2,2,False),(.4,3,3,True),(.7,4,3,True),
+                    (1.1,5,4,True),(1.3,5,5,True)]:
+   self.assertFalse(w.observe(t,m,s,ok))
+  self.assertEqual(near_obstacle_action(5.,5.,False),'replan')
  def test_three_second_obstacle_wait(self):
   p=ReplanPolicy();p.blocked(0)
   self.assertFalse(p.ready(2.99));self.assertTrue(p.ready(3.))

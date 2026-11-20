@@ -12,6 +12,31 @@ def near_obstacle_action(elapsed, limit, route_valid):
         return 'replan'
     return 'wait'
 
+class ClearWindow:
+    """Require successive clear checks backed by advancing scan and map stamps."""
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.first=None
+        self.previous=None
+
+    def observe(self, now, map_stamp, scan_stamp, clear):
+        if not clear or not map_stamp or not scan_stamp:
+            self.reset()
+            return False
+        if self.previous:
+            last, old_map, old_scan=self.previous
+            if now-last>.5 or map_stamp<old_map or scan_stamp<old_scan:
+                self.reset()
+            elif map_stamp==old_map or scan_stamp==old_scan:
+                return False
+        if self.first is None:
+            self.first=now
+        self.previous=(now,map_stamp,scan_stamp)
+        return now-self.first>=.5
+
+
 class ReplanPolicy:
     def __init__(self,wait=3.,cooldown=3.,max_attempts=8,stall_limit=60.):
         if type(max_attempts) is not int or max_attempts<1:

@@ -5,7 +5,7 @@ from pathlib import Path
 import yaml,hashlib
 import numpy as np
 from geometry import imu_from_base,pose_matrix,navigation_pose
-from route_validation import check_route,ReplanPolicy,near_obstacle_action
+from route_validation import check_route,ReplanPolicy,near_obstacle_action,ClearWindow
 from body_planner import replan_body,departure_heading,PlanningTimeout,turn_drift_margin
 from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
@@ -132,7 +132,7 @@ def main():
  route_future=None;route_requested=0.;route_next_check=0.;route_last_valid=None;route_after='prepare';route_details={}
  pending_replan_charge=False
  background_future=None;background_ready=None;background_retry_at=0.;route_grid=None
- replan_policy=ReplanPolicy(max_attempts=replan_cfg.get('max_replan_attempts',8));obstacle_at=None;near_block=False;obstacle_force_replan=False
+ replan_policy=ReplanPolicy(max_attempts=replan_cfg.get('max_replan_attempts',8));obstacle_at=None;near_block=False;clear_window=ClearWindow();obstacle_force_replan=False
  sdk={}; loc={}; pose=None; raw=None; odom=None
  sdk_at=loc_at=pose_at=raw_at=odom_at=scan_at=-math.inf
  sdk_identity=None; loc_identity=None; walk_gate=WalkGate()
@@ -204,7 +204,7 @@ def main():
    sdk={k:sdk.get(k) for k in ('state_sequence','state_age_sec','reported_forward_speed','reported_lateral_speed','reported_yaw_rate','command_zero','motion','bridge_target','bridge_ramped','sdk_move_normalized_lr_fb_yaw','move_sequence','move_age_sec','cmd_age_sec','move_write_ok','move_write_failed','speed_level','limits_vx_wz_ax_aw')},
    receive_age={k:age(now,v) for k,v in dict(localization=loc_at,pose=pose_at,scan=scan_at,odom=odom_at,scan_health=health_at,sdk=sdk_at,dwb=controller_at,smoothed=raw_at,raw_fastlio=raw_lio_at).items()},
    source_age=dict(scan=None if scan_stamp is None else n.get_clock().now().nanoseconds/1e9-scan_stamp,raw_fastlio=None if raw_lio is None else n.get_clock().now().nanoseconds/1e9-raw_lio['stamp'],pose=source_age(pose.header) if pose else None,odom=source_age(odom.header) if odom else None,localization=None if loc.get('source_stamp') is None else n.get_clock().now().nanoseconds/1e9-loc['source_stamp']),
-   scan_health=scanhealth,tf=transform_snapshot(),tf_reason=tf_reason(),diagnostic_error=trace.error)
+   scan_health=scanhealth,scan_diagnostics=dict(scan_diag,counts=scan_counts),tf=transform_snapshot(),tf_reason=tf_reason(),diagnostic_error=trace.error)
  def on_raw_lio(m):
   nonlocal raw_lio,raw_lio_at,raw_geometry
   q=m.pose.pose.orientation;p=m.pose.pose.position
@@ -237,11 +237,22 @@ def main():
    d=json.loads(m.data)
    if isinstance(d,dict): loc=d; loc_at=time.monotonic()
   except ValueError: pass
+ scan_counts={};scan_callbacks={};scan_publications={};scan_diag={}
+ def match_scan(key):
+  if key in scan_callbacks and key in scan_publications:
+   scan_diag["matched"]=dict(scan_publications[key],**scan_callbacks[key])
  def on_health(m):
   nonlocal scanhealth,health_at
   try:
    d=json.loads(m.data)
-   if isinstance(d,dict): scanhealth=d; health_at=time.monotonic()
+   if isinstance(d,dict):
+    scanhealth=d;health_at=time.monotonic()
+    timing=d.get('scan_timing') or {}
+    key=timing.get('source_ns')
+    if key is not None and key not in scan_publications:
+     scan_publications[key]=timing
+     if len(scan_publications)>32:del scan_publications[next(iter(scan_publications))]
+     match_scan(key)
   except ValueError: pass
  def stamp_age(h): return n.get_clock().now().nanoseconds*1e-9-h.stamp.sec-h.stamp.nanosec*1e-9
  def on_pose(m):
@@ -262,9 +273,22 @@ def main():
   if m.header.frame_id=='nav_odom' and m.child_frame_id=='nav_base' and -.05<stamp_age(m.header)<.4: odom=m; odom_at=time.monotonic()
  def on_scan(m):
   nonlocal scan_at,scan_stamp
-  t=m.header.stamp.sec+m.header.stamp.nanosec*1e-9
-  if m.header.frame_id=='nav_base' and -.05<n.get_clock().now().nanoseconds*1e-9-t<.4 and len(m.ranges)==720:
-   scan_at=time.monotonic();scan_stamp=t
+  key=m.header.stamp.sec*10**9+m.header.stamp.nanosec
+  callback_ns=n.get_clock().now().nanoseconds
+  delta=(callback_ns-key)*1e-9
+  if m.header.frame_id!='nav_base':reason='wrong_frame'
+  elif delta<=-.05:reason='future_stamp'
+  elif delta>=.4:reason='source_stale'
+  elif len(m.ranges)!=720:reason='wrong_beam_count'
+  else:
+   reason='accepted';scan_at=time.monotonic();scan_stamp=key*1e-9
+  scan_counts[reason]=scan_counts.get(reason,0)+1
+  event=dict(callback_ns=callback_ns,decision=reason,decision_ns=n.get_clock().now().nanoseconds)
+  scan_callbacks[key]=event
+  if len(scan_callbacks)>32:del scan_callbacks[next(iter(scan_callbacks))]
+  scan_diag['latest']=dict(source_ns=key,**event)
+  if reason!='accepted':scan_diag['last_rejection']=scan_diag['latest']
+  match_scan(key)
  n.create_subscription(String,'/d1/sdk/d1_motion_status',on_sdk,1)
  n.create_subscription(String,'/d1/localization/status',on_loc,1)
  n.create_subscription(String,'/d1/nav/scan_status',on_health,1)
@@ -345,7 +369,7 @@ def main():
   m=route_future.result().map;route_future=None
   meta=m.metadata;q=meta.origin.orientation
   if m.header.frame_id!='map':raise RuntimeError('[PATH_CHECK_FRAME] 全局代价地图坐标系错误')
-  grid=dict(width=meta.size_x,height=meta.size_y,resolution=meta.resolution,
+  grid=dict(stamp_ns=m.header.stamp.sec*10**9+m.header.stamp.nanosec,width=meta.size_x,height=meta.size_y,resolution=meta.resolution,
             origin=[meta.origin.position.x,meta.origin.position.y,quaternion_yaw(q)],data=m.data)
   route_grid=grid
   points=[[p.pose.position.x,p.pose.position.y] for p in pending_message.path.poses]
@@ -357,7 +381,7 @@ def main():
    body_future=body_executor.submit(replan_body,grid,current_pose(),[target['x'],target['y'],target['yaw']],length,width,points,route_details,root/'work/navigation'/task_id)
    print('[BODY_REPLAN] 搜索机身可通行且远离墙角的路线，保持停车。',flush=True)
    return None
-  route_last_valid=ok;route_next_check=now+1.;trace.emit('path_check',valid=ok,details=route_details)
+  route_last_valid=ok;route_next_check=time.monotonic()+(.20 if near_block and state=='OBSTACLE_WAIT' else 1.);trace.emit('path_check',valid=ok,details=route_details)
   return ok
  def queue_route_check(after='prepare',force_plan=False):
   nonlocal route_after,route_future,route_last_valid,deadline,body_future,body_repaired,body_force,background_future,background_ready
@@ -392,7 +416,7 @@ def main():
   nonlocal near_block
   nonlocal obstacle_at,obstacle_force_replan,deadline,terminal,route_future,route_next_check,route_last_valid
   if state=='OBSTACLE_WAIT':return
-  near_block=near
+  near_block=near;clear_window.reset()
   zero();obstacle_at=now;obstacle_force_replan=force;replan_policy.blocked(now);replan_policy.progress(now,0.,False)
   if route_future is not None:route_costmap.remove_pending_request(route_future);route_future=None
   route_last_valid=None;route_next_check=now;stop_sequences.clear()
@@ -404,6 +428,7 @@ def main():
   zero()
   if state=='INPUT_PAUSE':return
   pause_category=category;budget.begin_wait(now,category)
+  clear_window.reset()
   paused_state=state;transition('INPUT_PAUSE',reason);stable_since=None
   paused_at=now;motion_guard.reset();settled_review.reset();replan_policy.progress(now,0.,False)
   paused_sequence=sdk.get('state_sequence');paused_stamp=loc.get('source_stamp')
@@ -657,7 +682,7 @@ def main():
       continue
      terminal=True
     if not stopped() or not costmap_fresh(now):
-     stop_sequences.clear();continue
+     clear_window.reset();stop_sequences.clear();continue
     stop_sequences.add(sdk.get('state_sequence'))
     if len(stop_sequences)<2 or now-obstacle_at<.7:continue
     if background_ready is not None and not near_block:
@@ -683,12 +708,16 @@ def main():
     if route_future is None and now>=route_next_check:request_route_check(now)
     checked=poll_route_check(now)
     if checked is None and route_future is not None:continue
-    if route_last_valid is True and not obstacle_force_replan:
+    clear=route_last_valid
+    if near_block:
+     if checked is None:continue
+     clear=clear_window.observe(time.monotonic(),route_grid['stamp_ns'],scan_stamp,checked)
+    if clear is True and not obstacle_force_replan:
      background_ready=None;replan_policy.since=None;terminal=True;goal=None;result=None
      trim_current_route()
      print('[OBSTACLE_CLEARED] 路线已重新通过机身检查，恢复前复核起步朝向。',flush=True)
-     queue_route_check('prepare');continue
-    if near_block and near_obstacle_action(now-obstacle_at,near_wait,route_last_valid)!='replan':continue
+     queue_route_check('resume' if near_block else 'prepare');continue
+    if near_block and near_obstacle_action(now-obstacle_at,near_wait,clear)!='replan':continue
     if near_block and background_ready is not None:
      values,certificate=background_ready;background_ready=None
      terminal=True;goal=None;result=None;install_body_route(values,certificate)
