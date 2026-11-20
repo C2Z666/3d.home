@@ -1,12 +1,14 @@
 import math
 import sys
 import unittest
+import json
+import tempfile
 from pathlib import Path
 import numpy as np
 import cv2
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
-from body_planner import BodyGrid, plan_body, certify
+from body_planner import BodyGrid, plan_body, certify, replan_body, ANGLES, preview_body
 
 
 def grid(a):
@@ -43,6 +45,42 @@ class BodyPlannerTests(unittest.TestCase):
         self.assertTrue(certify([[p['x'],p['y']] for p in path],[1,2,0],grid(a),goal_yaw=0)[0])
         with self.assertRaises(ValueError):plan_body(grid(a),[1,2,0],[5,2,math.pi/2])
         self.assertFalse(BodyGrid(grid(a)).turn_clear([2,2,0],math.pi/2))
+
+    def test_shallow_headings_and_certified_side_detour(self):
+        gaps=np.diff([*ANGLES,2*math.pi])
+        self.assertLess(np.max(gaps),math.radians(27))
+        a=np.zeros((100,140),np.uint8)
+        a[49:52,59:62]=254
+        # Force the detour onto the open side of the passage.
+        a[:37,:]=254
+        g=grid(a);start=[1.,2.5,0.];goal=[5.,2.5,0.]
+        ref=np.linspace(start[:2],goal[:2],81)
+        ok,detail=certify(ref,start,g)
+        self.assertFalse(ok)
+        with tempfile.TemporaryDirectory() as directory:
+            path,info=replan_body(g,start,goal,.50,.275,ref,detail,Path(directory)/'round')
+        self.assertEqual(info['planner'],'side_detour')
+        self.assertGreater(info['offset_m'],0.)
+        self.assertTrue(certify([[p['x'],p['y']] for p in path],start,g,goal_yaw=0.)[0])
+
+    def test_preview_bends_around_corner(self):
+        a=np.zeros((100,160),np.uint8)
+        a[49:60,72:79]=254
+        start=[1.,2.5,0.]; goal=[6.,2.5,math.pi/2]
+        g=grid(a)
+        self.assertFalse(certify([start[:2],goal[:2]],start,g,goal_yaw=goal[2])[0])
+        path,info=preview_body(g,start,goal,.50,.275)
+        self.assertEqual(info['planner'],'preview_single_bend')
+        self.assertTrue(certify([[p['x'],p['y']] for p in path],start,g,goal_yaw=goal[2])[0])
+
+    def test_failed_search_snapshot(self):
+        a=np.zeros((80,100),np.uint8);a[40,20]=254
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(ValueError):
+                replan_body(grid(a),[1,2,0],[3,2,0],.5,.275,[],{},Path(directory)/'round')
+            with np.load(next(Path(directory).glob('round.*.npz'))) as snapshot:
+                np.testing.assert_array_equal(snapshot['grid'],a)
+                self.assertEqual(json.loads(str(snapshot['metadata']))['start'],[1,2,0])
 
     def test_cost_categories_and_unknown(self):
         a=np.zeros((80,100),np.uint8);a[20:25,20:35]=253

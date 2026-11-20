@@ -1,7 +1,7 @@
 import sys,unittest
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
-from route_validation import ReplanPolicy,check_route
+from route_validation import ReplanPolicy,check_route,near_obstacle_action
 from body_planner import PlanningTimeout,remaining_points
 import numpy as np,pickle
 
@@ -9,17 +9,26 @@ class Episodes(unittest.TestCase):
  def test_background_path_does_not_turn_back_to_passed_waypoint(self):
   points,index=remaining_points([[0,0],[.1,0],[.2,0]],[.04,0,0])
   self.assertEqual(index,1);self.assertGreater(points[0,0],.04)
+ def test_near_obstacle_early_clear_and_deadline(self):
+  self.assertEqual(near_obstacle_action(1.,5.,True),"resume")
+  self.assertEqual(near_obstacle_action(4.99,5.,False),"wait")
+  self.assertEqual(near_obstacle_action(5.,5.,False),"replan")
+  self.assertEqual(near_obstacle_action(5.,5.,None),"wait")
  def test_three_second_obstacle_wait(self):
   p=ReplanPolicy();p.blocked(0)
   self.assertFalse(p.ready(2.99));self.assertTrue(p.ready(3.))
   p.cleared();self.assertFalse(p.ready(5))
  def test_new_path_alone_cannot_reset_count_but_progress_can(self):
   p=ReplanPolicy();p.blocked(0)
-  for t in (3,6,9,12):self.assertTrue(p.request(t))
-  self.assertFalse(p.request(15));p.cleared();self.assertEqual(p.attempts,4)
-  self.assertFalse(p.progress(16,5.));self.assertFalse(p.progress(18,4.4))
-  self.assertTrue(p.progress(19,4.4));self.assertEqual(p.attempts,0)
-  p.blocked(20);self.assertTrue(p.request(23))
+  for t in range(3,25,3):self.assertTrue(p.request(t))
+  self.assertFalse(p.request(27));p.cleared();self.assertEqual(p.attempts,8)
+  self.assertFalse(p.progress(28,5.));self.assertFalse(p.progress(30,4.4))
+  self.assertTrue(p.progress(31,4.4));self.assertEqual(p.attempts,0)
+  p.blocked(32);self.assertTrue(p.request(35))
+ def test_stall_budget_excludes_contiguous_wait_phases(self):
+  p=ReplanPolicy();p.blocked(10);p.set_waiting(29,True);p.set_waiting(34,True)
+  self.assertFalse(p.stall_error(140));p.set_waiting(140,False)
+  self.assertFalse(p.stall_error(180.99));self.assertTrue(p.stall_error(181))
  def test_waiting_or_oscillation_is_not_progress(self):
   p=ReplanPolicy();p.blocked(0);p.request(3)
   p.progress(4,5);p.progress(10,5.1);self.assertEqual(p.attempts,1)

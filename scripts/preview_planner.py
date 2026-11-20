@@ -136,7 +136,7 @@ class PreviewPlanner:
         return future.result()
 
     def plan(self, data):
-        from body_planner import plan_body
+        from body_planner import preview_body, PlanningTimeout
         import json
         import yaml
         if not self.lock.acquire(blocking=False):
@@ -150,8 +150,10 @@ class PreviewPlanner:
             length = max(abs(p[0]) for p in footprint)+body['footprint_padding']
             width = max(abs(p[1]) for p in footprint)+body['footprint_padding']
             try:
-                path, certificate = plan_body(self.costmap(fresh=True),
+                path, certificate = preview_body(self.costmap(fresh=True),
                     [start[k] for k in ('x','y','yaw')], [goal[k] for k in ('x','y','yaw')], length, width)
+            except PlanningTimeout as e:
+                raise PreviewError(str(e), 'body_planning_timeout') from e
             except ValueError as e:
                 raise PreviewError(str(e), 'body_planning_failed') from e
             _, _, current_identity = validate_request(data, self.scene, self.maps, self.snapshot())

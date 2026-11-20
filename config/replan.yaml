@@ -1,2 +1,6 @@
 # Distance along the verified route before handing off to a detour.
 replan_radius_m: 3.0
+# Maximum observation wait for a blocked near segment.
+near_obstacle_wait_sec: 5.0
+# Maximum counted replans during one uninterrupted blockage.
+max_replan_attempts: 8

@@ -46,7 +46,7 @@ class Repairs(unittest.TestCase):
     def test_cooldown_and_bounded_replans(self):
         p=ReplanPolicy();p.blocked(0);self.assertFalse(p.ready(1));self.assertTrue(p.ready(3.))
         self.assertTrue(p.request(3.));p.blocked(4);self.assertFalse(p.ready(3.9));self.assertTrue(p.ready(7.))
-        for t in (7.,10.,13.):self.assertTrue(p.request(t))
-        self.assertFalse(p.request(14))
+        for t in (7.,10.,13.,16.,19.,22.,25.):self.assertTrue(p.request(t))
+        self.assertFalse(p.request(28))
 
 if __name__=='__main__':unittest.main()

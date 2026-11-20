@@ -172,7 +172,7 @@ try:
    assert value==expected,(label,value,expected)
    assert (inflation>0)==(expected==254),(label,'inflation',inflation)
    assert int(d[0,0])==254,'Static wall was erased'
-   assert int(d[row,col+7])==0,'Dynamic inflation extends past 0.25m'
+   assert int(d[row,col+6])==0,'Dynamic inflation extends past 0.20m'
    assert int(d[120,7])>0,'Static wall lost 0.4m inflation'
   temporal_stage='present';check_temporal('present_for_12s',254,12.)
   temporal_stage='absent';check_temporal('absent_for_0_5s',254,.5)

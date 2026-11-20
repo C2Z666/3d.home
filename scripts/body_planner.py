@@ -4,12 +4,19 @@ Costs are raw Nav2 bytes: centre >=253, body >=254, unknown/outside blocked.
 Search keeps heading as part of the state. Clearance is a soft preference only.
 No modification of the costmap or its inflation radius is performed.
 """
+import json
 import heapq
 import math
 import time
 import numpy as np
 import cv2
 from scipy.ndimage import distance_transform_edt
+
+
+# Integer cell displacements keep every heading aligned with its translation.
+DIRECTIONS = ((1,0),(2,1),(1,1),(1,2),(0,1),(-1,2),(-1,1),(-2,1),
+              (-1,0),(-2,-1),(-1,-1),(-1,-2),(0,-1),(1,-2),(1,-1),(2,-1))
+ANGLES = tuple(math.atan2(y,x) % (2*math.pi) for x,y in DIRECTIONS)
 
 
 def wrap(a):
@@ -89,6 +96,15 @@ class BodyGrid:
 
     def line_clear(self, p, q, yaw):
         distance = math.hypot(q[0]-p[0], q[1]-p[1])
+        # A lattice edge in open space can be certified without sampling the
+        # footprint repeatedly. The centre can still encounter inflated cells.
+        col,row = math.floor(p[0]/self.r),math.floor(p[1]/self.r)
+        if (0<=col<self.w and 0<=row<self.h and
+                self.clearance[row,col] > distance+self.radius+3*self.r):
+            c,r = math.floor(q[0]/self.r),math.floor(q[1]/self.r)
+            box=self.data[min(row,r)-1:max(row,r)+2,min(col,c)-1:max(col,c)+2]
+            if box.size and box.max()<253:
+                return True
         n = max(1, math.ceil(distance/(self.r/2)))
         pad = distance/(2*n)+1e-6
         # Also pad centre path against forbidden centre cells, independently of
@@ -122,15 +138,17 @@ class BodyGrid:
         return final_yaw is None or self.turn_clear([q[0],q[1],yaw],final_yaw)
 
     def field(self, heading, turn=False):
-        key=(heading%8,turn)
+        key=(heading%len(ANGLES),turn)
         if key in self.fields:return self.fields[key]
         # Translation fields only prune endpoint/midpoint collisions; line_clear
         # certifies the complete edge. Do not add a circular clearance envelope.
-        pad = 0. if not turn else turn_drift_margin(math.pi/4)+self.radius*math.pi/64+1e-6
+        angle = ANGLES[heading]
+        delta = (ANGLES[(heading+1)%len(ANGLES)]-angle) % (2*math.pi)
+        pad = 0. if not turn else turn_drift_margin(delta)+self.radius*delta/16+1e-6
         size=math.ceil(math.hypot(self.l+pad,self.b+pad)/self.r)+2
         yy,xx=np.mgrid[-size:size+1,-size:size+1]*self.r
         mask=np.zeros(xx.shape,bool)
-        angles=[heading*math.pi/4] if not turn else np.linspace(heading*math.pi/4,(heading+1)*math.pi/4,9)
+        angles=[angle] if not turn else np.linspace(angle,angle+delta,9)
         for a in angles:
             c,s=math.cos(a),math.sin(a);l,b=self.l+pad,self.b+pad;hh=self.r/2
             mask |= ((abs(xx)<=abs(c)*l+abs(s)*b+hh)&(abs(yy)<=abs(s)*l+abs(c)*b+hh)&
@@ -182,12 +200,11 @@ def plan_body(grid, start, goal, half_length=.50, half_width=.275, timeout=8.):
     s,t=body.local(start),body.local(goal)
     if not body.pose_clear(*s):raise ValueError('起点机身覆盖实体障碍或未知区，无法认证起步')
     if not body.pose_clear(*t):raise ValueError('目标机身或朝向与障碍冲突，请调整目标')
-    # 8-heading state lattice, 10 cm translations and explicit certified turns.
-    step=2;dirs=[(1,0),(1,1),(0,1),(-1,1),(-1,0),(-1,-1),(0,-1),(1,-1)]
+    step=2;dirs=DIRECTIONS
     sc,sr=int(s[0]/body.r),int(s[1]/body.r)
     dist={};parent={};queue=[];serial=0
     def pose(state):
-        c,r,h=state;return [(c+.5)*body.r,(r+.5)*body.r,h*math.pi/4]
+        c,r,h=state;return [(c+.5)*body.r,(r+.5)*body.r,ANGLES[h]]
     def push(state,cost,prev):
         nonlocal serial
         if cost>=dist.get(state,float('inf')):return
@@ -195,14 +212,14 @@ def plan_body(grid, start, goal, half_length=.50, half_width=.275, timeout=8.):
         q=pose(state);heur=math.hypot(q[0]-t[0],q[1]-t[1])
         heapq.heappush(queue,(cost+heur,serial,cost,state))
     for dc,dr in [(0,0),(-1,0),(1,0),(0,-1),(0,1)]:
-        for h in range(8):
+        for h in range(len(ANGLES)):
             state=(sc+dc,sr+dr,h);q=pose(state)
             if body.connect(s,q,q[2]):push(state,math.hypot(q[0]-s[0],q[1]-s[1])+.08*abs(wrap(q[2]-s[2])),None)
     # A subcell offset must not force a 45-degree turn at a narrow-corridor
     # start. Connect farther lattice anchors with the same full sweep check.
-    for h in range(8):
+    for h in range(len(ANGLES)):
         for distance in (.25,.5,.75):
-            a=h*math.pi/4
+            a=ANGLES[h]
             state=(int((s[0]+distance*math.cos(a))/body.r),int((s[1]+distance*math.sin(a))/body.r),h)
             q=pose(state)
             if body.connect(s,q,q[2]):push(state,math.hypot(q[0]-s[0],q[1]-s[1])+.08*abs(wrap(q[2]-s[2])),None)
@@ -214,8 +231,8 @@ def plan_body(grid, start, goal, half_length=.50, half_width=.275, timeout=8.):
         expanded+=1;c,r,h=state;q=pose(state)
         if math.hypot(q[0]-t[0],q[1]-t[1])<.9 and body.connect(q,t,t[2]):end=state;break
         for dh in (-1,1):
-            nh=(h+dh)%8;field=body.field(h if dh==1 else nh,True)
-            if 0<=c<body.w and 0<=r<body.h and not field[r,c]:push((c,r,nh),cost+.10,state)
+            nh=(h+dh)%len(ANGLES);field=body.field(h if dh==1 else nh,True)
+            if 0<=c<body.w and 0<=r<body.h and not field[r,c]:push((c,r,nh),cost+.10*abs(wrap(ANGLES[nh]-ANGLES[h]))/(math.pi/4),state)
         dc,dr=dirs[h];nc,nr=c+dc*step,r+dr*step
         if not (0<=nc<body.w and 0<=nr<body.h):continue
         field=body.field(h)
@@ -252,10 +269,110 @@ def plan_body(grid, start, goal, half_length=.50, half_width=.275, timeout=8.):
     points=[body.world(q)[:2] for q in out]
     ok,detail=certify(points,start,body,goal_yaw=goal[2],trim=False)
     if not ok:raise ValueError('候选路线未通过统一连续机身复核: '+str(detail))
+    return dense_route(points,goal),dict(planner='rectangular_lattice',expanded=expanded,compute_sec=time.monotonic()-begin,certified=True)
+
+
+def dense_route(points, goal):
     # Densify straight certified segments for DWB, preserving exact corners.
     result=[]
     for a,b in zip(points,points[1:]):
+        if math.dist(a,b)<1e-8:continue
         yaw=math.atan2(b[1]-a[1],b[0]-a[0]);n=max(1,math.ceil(math.dist(a,b)/.05))
         result.extend(dict(x=a[0]+(b[0]-a[0])*i/n,y=a[1]+(b[1]-a[1])*i/n,yaw=yaw) for i in range(n))
     result.append(dict(x=goal[0],y=goal[1],yaw=goal[2]))
-    return result,dict(planner='rectangular_lattice',expanded=expanded,compute_sec=time.monotonic()-begin,certified=True)
+    return result
+
+def preview_body(grid, start, goal, half_length, half_width, timeout=8.):
+    """Try direct and single-bend approaches before searching the heading lattice."""
+    begin = time.monotonic()
+    body = BodyGrid(grid, half_length, half_width)
+    for pose, message in ((start, '起点机身覆盖实体障碍或未知区'), (goal, '目标机身或朝向与障碍冲突')):
+        if not body.pose_clear(*body.local(pose)):
+            raise ValueError(message)
+    a, b = np.asarray(start[:2]), np.asarray(goal[:2])
+    distance = np.linalg.norm(b-a)
+    normal = np.array([a[1]-b[1], b[0]-a[0]]) / max(distance, 1e-9)
+    directions = [normal, [math.cos(goal[2]), math.sin(goal[2])],
+                  [math.cos(body.angle), math.sin(body.angle)], [-math.sin(body.angle), math.cos(body.angle)]]
+    candidates = [[a,b]]
+    for offset in (.55, 1., 1.5):
+        for sign in (1,-1):
+            for direction in directions:
+                candidates.append([a,b+sign*offset*np.asarray(direction),b])
+            candidates.append([a,(a+b)/2+sign*offset*normal,b])
+
+    # Score the complete centreline against real obstacles before running the
+    # more expensive continuous rectangle and pivot checks on the best options.
+    ranked = []
+    for points in candidates:
+        cost = 0.
+        for p,q in zip(points,points[1:]):
+            segment = math.dist(p,q)
+            local = np.linspace(body.local([*p,0])[:2], body.local([*q,0])[:2],
+                                max(2,math.ceil(segment/max(.1,body.r))+1))
+            cells = np.floor(local/body.r).astype(int)
+            x,y = cells.T
+            if ((x<0)|(y<0)|(x>=body.w)|(y>=body.h)).any() or (body.data[y,x]>=253).any():
+                break
+            clearance = body.clearance[y,x]
+            cost += segment*(1+4*np.mean(np.maximum(0.,1-clearance/.85)**2))
+        else:
+            ranked.append((cost,points))
+    for _, points in sorted(ranked,key=lambda item:item[0]):
+        if time.monotonic()-begin > min(1.,timeout/3):
+            break
+        ok,_ = certify(points,start,body,goal_yaw=goal[2],trim=False)
+        if ok:
+            return dense_route(points,goal),dict(planner='preview_direct' if len(points)==2 else 'preview_single_bend',
+                                                 compute_sec=time.monotonic()-begin,certified=True)
+    remaining = timeout-(time.monotonic()-begin)
+    return plan_body(grid,start,goal,half_length,half_width,timeout=remaining)
+
+
+def replan_body(grid, start, goal, length, width, reference, detail, snapshot_prefix):
+    """Try both sides of the blocked section before the full lattice search."""
+    begin = time.monotonic()
+    body = BodyGrid(grid, length, width)
+    try:
+        if detail.get('reason') == 'swept_body_blocked' and len(reference) >= 2:
+            remaining, _ = remaining_points(reference, start)
+            route = np.vstack((start[:2], remaining[:,:2]))
+            steps = np.linalg.norm(np.diff(route, axis=0), axis=1)
+            route = route[np.r_[True, steps > 1e-6]]
+            along = np.r_[0., np.cumsum(np.linalg.norm(np.diff(route,axis=0),axis=1))]
+            hit = min(along[-1], detail['clear_prefix_m'] + length)
+            join = min(along[-1], hit + 1.6)
+            def at(distance):
+                return np.array([np.interp(distance, along, axis) for axis in route.T])
+            direction = at(min(along[-1],hit+.3)) - at(max(0.,hit-.3))
+            normal = np.array([-direction[1],direction[0]]) / max(np.linalg.norm(direction),1e-9)
+            choices = []
+            for offset in (.45,-.45,.70,-.70,1.,-1.):
+                lead, tail = max(0.,hit-.5), min(join,hit+.5)
+                points = np.vstack((route[0], at(lead)+offset*normal, at(tail)+offset*normal,
+                                    at(join), route[along>join]))
+                # Rank by minimum clearance along the entire bypass, then length.
+                samples = np.vstack([np.linspace(a,b,max(2,math.ceil(math.dist(a,b)/body.r)+1))
+                                     for a,b in zip(points[:3],points[1:4])])
+                cells = np.array([body.local([x,y,0])[:2]/body.r for x,y in samples]).astype(int)
+                if ((cells<0).any() or (cells[:,0]>=body.w).any() or (cells[:,1]>=body.h).any()):continue
+                clearance = body.clearance[cells[:,1],cells[:,0]].min()
+                choices.append((min(.85,clearance),-abs(offset),offset,points))
+            for _,__,offset,points in sorted(choices,key=lambda item:item[:2],reverse=True):
+                if time.monotonic()-begin>1.:break
+                ok,_ = certify(points,start,body,goal_yaw=goal[2],trim=False)
+                if ok:
+                    return dense_route(points,goal),dict(planner='side_detour',offset_m=offset,
+                                compute_sec=time.monotonic()-begin,certified=True)
+        return plan_body(grid,start,goal,length,width,timeout=max(1.,8.-(time.monotonic()-begin)))
+    except ValueError as error:
+        # One compressed grid per failed search, scoped to its mission.
+        filename = str(snapshot_prefix)+'.'+str(time.time_ns())+'.npz'
+        try:
+            meta=dict(start=list(map(float,start)),goal=list(map(float,goal)),half_length=length,half_width=width,
+                      resolution=body.r,origin=grid['origin'],trigger=detail,error=str(error))
+            np.savez_compressed(filename,grid=body.data,reference=np.asarray(reference),
+                                metadata=json.dumps(meta,ensure_ascii=False))
+        except (OSError,TypeError,ValueError) as snapshot_error:
+            print('[REPLAN_SNAPSHOT_FAILED]',snapshot_error,flush=True)
+        raise

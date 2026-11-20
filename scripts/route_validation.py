@@ -5,11 +5,20 @@ from body_planner import certify
 def check_route(points,current,grid,half_length=.50,half_width=.275,goal_yaw=None):
     return certify(points,current,grid,half_length,half_width,goal_yaw=goal_yaw)
 
+def near_obstacle_action(elapsed, limit, route_valid):
+    if route_valid is True:
+        return 'resume'
+    if route_valid is False and elapsed >= limit:
+        return 'replan'
+    return 'wait'
+
 class ReplanPolicy:
-    def __init__(self,wait=3.,cooldown=3.,max_attempts=4,stall_limit=60.):
+    def __init__(self,wait=3.,cooldown=3.,max_attempts=8,stall_limit=60.):
+        if type(max_attempts) is not int or max_attempts<1:
+            raise ValueError('max_replan_attempts 必须为正整数')
         self.wait=wait;self.cooldown=cooldown;self.max_attempts=max_attempts
         self.since=None;self.last=-math.inf;self.attempts=0
-        self.stalled_at=None;self.stall_limit=stall_limit
+        self.stalled_at=None;self.stall_limit=stall_limit;self.pause_at=None
         self.progress_at=None;self.progress_distance=None
     def blocked(self,now):
         if self.since is None:self.since=now
@@ -36,7 +45,15 @@ class ReplanPolicy:
             self.progress_at=now;self.progress_distance=distance
             return reset
         return False
+    def set_waiting(self,now,waiting):
+        if waiting and self.pause_at is None:
+            self.pause_at=now
+        elif not waiting and self.pause_at is not None:
+            if self.stalled_at is not None:
+                self.stalled_at+=max(0.,now-max(self.pause_at,self.stalled_at))
+            self.pause_at=None
     def stall_error(self,now):
-        if self.stalled_at is not None and now-self.stalled_at>=self.stall_limit:
-            return '[OBSTACLE_STALL_TIMEOUT] 本次受阻60秒仍未取得有效前进，已停车'
+        end=now if self.pause_at is None else min(now,self.pause_at)
+        if self.stalled_at is not None and end-self.stalled_at>=self.stall_limit:
+            return '[OBSTACLE_STALL_TIMEOUT] 扣除停车等待后，累计60秒仍未取得有效前进，已停车'
         return ''
