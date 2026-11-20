@@ -101,3 +101,8 @@ class TerminalYaw:
                 return 0., 'YAW_PREDICTED_BRAKE'
             return math.copysign(max(.12,min(.25,.8*abs(error))),error), 'TURN'
         return self.feedback.update(stamp, now, compute)
+
+
+def terminal_turn_position_limit(yaw_error):
+    """Reserve translation margin before a large final turn, not acceptance slack."""
+    return .20 if abs(wrap(yaw_error))>.6 else .30

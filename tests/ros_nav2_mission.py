@@ -196,9 +196,9 @@ try:
    assert value==(0 if voxel_stage=='clear' else 254),(voxel_stage,value)
    assert int(d[0,0])==254, 'Static wall must remain'
   reports['voxel_evidence']=results;n.destroy_client(cost);current_case='startup'
- for case in ('goal_reached','localization_loss','runtime_limit','approved_path','approved_turn','behind_path','curved_path','slow_turn','turn_stall','unexpected_reverse','operator_cancel','tf_loss','turn_obstacle','visual_shift_turn','terminal_shift','tf_transient','tf_transient_turn','turn_inflation','turn_drift','turn_drift_path','motion_retry','data_retries','map_z_drift','flat_tilt_diagnostic','dynamic_clear'):
+ for case in ('near_yaw','terminal_margin','goal_reached','localization_loss','runtime_limit','approved_path','approved_turn','behind_path','curved_path','slow_turn','turn_stall','unexpected_reverse','operator_cancel','tf_loss','turn_obstacle','visual_shift_turn','terminal_shift','tf_transient','tf_transient_turn','turn_inflation','turn_drift','turn_drift_path','motion_retry','data_retries','map_z_drift','flat_tilt_diagnostic','dynamic_clear'):
   if os.environ.get('D1_TEST_CASES') and case not in os.environ['D1_TEST_CASES'].split(','):continue
-  current_case=case;case_start=time.monotonic()+1000;tf_available=True;obstacle=False;x=y=yaw=0.;actual_vx=actual_wz=0.;motion='Walk';ready=True;command=Twist();request=confirmed=0;map_dx=0.;shift_enabled=False;drift_enabled=False
+  margin_shifted=False;current_case=case;case_start=time.monotonic()+1000;tf_available=True;obstacle=False;x=y=yaw=0.;actual_vx=actual_wz=0.;motion='Walk';ready=True;command=Twist();request=confirmed=0;map_dx=0.;shift_enabled=False;drift_enabled=False
   # The live layer now retains observation clouds for 10s. Clearing grid
   # cells alone cannot remove a previous case's still-valid observations.
   if any(isinstance(v,dict) and v.get('result')=='PASS' for v in reports.values()):
@@ -216,10 +216,10 @@ try:
    assert f.done();n.destroy_client(c)
   for _ in range(30):step()
   drift_enabled=case in ('turn_drift','turn_drift_path')
-  target_x=2.0 if case=='dynamic_clear' else 3.0 if case=='data_retries' else 3. if case=='runtime_limit' else .02 if case in ('approved_turn','slow_turn','turn_stall','unexpected_reverse','turn_obstacle','tf_transient_turn','turn_inflation','turn_drift') else -.5 if case in ('behind_path','visual_shift_turn','turn_drift_path') else .65 if case=='curved_path' else .55
+  target_x=.02 if case=='near_yaw' else 2.0 if case=='dynamic_clear' else 3.0 if case=='data_retries' else 3. if case=='runtime_limit' else .02 if case in ('approved_turn','slow_turn','turn_stall','unexpected_reverse','turn_obstacle','tf_transient_turn','turn_inflation','turn_drift') else -.5 if case in ('behind_path','visual_shift_turn','turn_drift_path') else .65 if case=='curved_path' else .55
   target_y=.04 if os.environ.get('D1_TEST_WEAK_PLANT')=='1' and case=='approved_path' else .1 if case=='behind_path' else .6 if case=='curved_path' else 0.
-  target_yaw=2.8 if case=='tf_transient_turn' else 2. if case=='terminal_shift' else math.pi if case in ('slow_turn','visual_shift_turn','turn_drift','turn_drift_path') else 1. if case in ('approved_turn','turn_stall','unexpected_reverse','behind_path','turn_obstacle','turn_inflation') else math.pi/2 if case=='curved_path' else 0.
-  runtime=40. if case in ('map_z_drift','dynamic_clear','flat_tilt_diagnostic') else 40. if os.environ.get('D1_TEST_WEAK_PLANT')=='1' and case=='approved_path' else 60. if case=='data_retries' else 60. if case in ('visual_shift_turn','terminal_shift','tf_transient_turn','turn_drift','turn_drift_path') else 30. if case in ('behind_path','curved_path','slow_turn','tf_transient','motion_retry') else 20. if case in ('approved_path','approved_turn') else 10.
+  target_yaw=.11 if case=='near_yaw' else 2.05 if case=='terminal_margin' else 2.8 if case=='tf_transient_turn' else 2. if case=='terminal_shift' else math.pi if case in ('slow_turn','visual_shift_turn','turn_drift','turn_drift_path') else 1. if case in ('approved_turn','turn_stall','unexpected_reverse','behind_path','turn_obstacle','turn_inflation') else math.pi/2 if case=='curved_path' else 0.
+  runtime=60. if case=='terminal_margin' else 20. if case=='near_yaw' else 40. if case in ('map_z_drift','dynamic_clear','flat_tilt_diagnostic') else 40. if os.environ.get('D1_TEST_WEAK_PLANT')=='1' and case=='approved_path' else 60. if case=='data_retries' else 60. if case in ('visual_shift_turn','terminal_shift','tf_transient_turn','turn_drift','turn_drift_path') else 30. if case in ('behind_path','curved_path','slow_turn','tf_transient','motion_retry') else 20. if case in ('approved_path','approved_turn') else 10.
   args=['--live','--x',str(target_x),'--y',str(target_y),'--yaw',str(target_yaw),'--max-runtime',str(runtime)]
   route=R/'work/approved_test.path.json';route.parent.mkdir(exist_ok=True)
   if case=='curved_path':
@@ -237,6 +237,8 @@ try:
   while time.monotonic()-start<runtime+10 and process.poll() is None:
    step()
    if case=='visual_shift_turn' and '[ALIGN_PATH]' in (W/(case+'.log')).read_text():shift_enabled=True
+   if case=='terminal_margin' and not margin_shifted and '[POSITION_FINISHED]' in (W/(case+'.log')).read_text():
+    map_dx=-.14;margin_shifted=True
    if case=='terminal_shift' and '[ALIGN_YAW]' in (W/(case+'.log')).read_text():shift_enabled=True
    if case in ('turn_drift','turn_drift_path') and '[REACQUIRE_STOP]' in (W/(case+'.log')).read_text():drift_enabled=False
    if case=='runtime_limit' and timeout_seen is None and 'MAX_RUNTIME_EXCEEDED' in (W/(case+'.log')).read_text():timeout_seen=time.monotonic()
@@ -290,6 +292,10 @@ try:
     assert log.count('[INPUT_RECOVERED]')>=4,log
     assert '[POSITION_RECOVERY_LIMIT]' not in log and '[MOTION_RECOVERY_LIMIT]' not in log,log
    if case=='motion_retry':assert '[NO_MOTION_RESPONSE]' in log and '[INPUT_RECOVERED]' in log and '[REPLAN_READY]' in log,log
+   if case=='near_yaw':assert 'ALIGN_NO_PROGRESS' not in log,log
+   if case=='terminal_margin':
+    assert '[TURN_POSITION_MARGIN]' in log or '[FINAL_POSITION_ENVELOPE]' in log,log
+    assert '[REACQUIRE_STOP]' in log and '[REPLAN_READY]' in log,log
    if case=='terminal_shift':assert '[REACQUIRE_STOP]' not in log and '[POSITION_APPROXIMATE]' in log,log
    if case in ('turn_drift','turn_drift_path'):assert '[ALIGN_ODOM_DRIFT]' in log and '[REACQUIRE_STOP]' in log and '[REPLAN_READY]' in log,log
    if case=='turn_inflation':

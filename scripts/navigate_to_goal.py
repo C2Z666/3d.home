@@ -9,7 +9,7 @@ from route_validation import check_route,ReplanPolicy
 from body_planner import plan_body,departure_heading
 from concurrent.futures import ThreadPoolExecutor
 from mission_runtime import RecoveryBudget, MissionTrace
-from terminal_feedback import TerminalApproach, TerminalYaw
+from terminal_feedback import TerminalApproach, TerminalYaw, terminal_turn_position_limit
 from turn_recovery import TurnWait
 from navigation_control import HeadingAlignment, MotionGuard, swept_rotation_clearance, quaternion_yaw, wrap, initial_path_heading, scan_input_state, POSITION_TOLERANCE, POSITION_RELEASE, replan_errors, settled_goal_action, SettledGoalReview, RECOVERABLE_INPUT_PHASES
 
@@ -147,6 +147,10 @@ def main():
  def transition(next_state,reason=''):
   nonlocal state,raw,raw_at,command_missing_at,first_command_seen,yaw_priority_latched,terminal_started
   old=state
+  if alignment is not None and old in ('ALIGN_PATH','ALIGN_YAW') and next_state!=old:
+   alignment.pause(time.monotonic())
+  if alignment is not None and next_state in ('ALIGN_PATH','ALIGN_YAW'):
+   alignment.resume(time.monotonic())
   if next_state=='STOPPING' and old in ('WAIT','REPLAN','NAVIGATE','ACCEPT'):
    yaw_priority_latched=True
    if terminal_started is None:terminal_started=time.monotonic()
@@ -430,6 +434,12 @@ def main():
   reacquire_count+=1;transition('REACQUIRE_STOP',reason);halt_at=now;deadline=min(execution_deadline,now+10)
   raw=None;raw_at=-math.inf;stop_sequences.clear()
   print('[REACQUIRE_STOP] %s；类别=%s 计数=%s；停稳后重规划，总时限不重置。' % (reason,category,json.dumps(budget.snapshot(now),ensure_ascii=False)),flush=True)
+ def recover_terminal(reason,now):
+  nonlocal alignment,approach_attempted,terminal_started,yaw_priority_latched,yaw_attempts,turn_replan_route
+  reacquire(reason,now,category='position')
+  if state=='REACQUIRE_STOP':
+   alignment=None;approach_attempted=False;terminal_started=None
+   yaw_priority_latched=False;yaw_attempts=0;turn_replan_route=True
  def turn_clear(now):
   nonlocal next_turn_check_log
   if not costmap_fresh(now):
@@ -540,8 +550,6 @@ def main():
       terminal=True;goal=None;result=None;reacquire('零速等待恢复，丢弃旧路线和旧速度',now,category=pause_category,charged=pause_category=='motion')
      else:
       transition(paused_state)
-      if state in ('ALIGN_PATH','ALIGN_YAW'):
-       alignment.started+=now-paused_at;alignment.progress_at+=now-paused_at
       if state=='TERMINAL_APPROACH' and terminal_approach is not None:
        terminal_approach.resume_after_pause(now-paused_at)
       if state in ('STOPPING','REACQUIRE_STOP'):halt_at=now;deadline=min(execution_deadline,now+10);stop_sequences.clear()
@@ -695,6 +703,7 @@ def main():
      transition('STOPPING');deadline=min(execution_deadline,now+10);halt_at=now;zero()
      print('[FINAL_POSE_ACCEPTABLE] 位置和朝向已在最终验收范围；直接停车复核，不追加转向。',flush=True)
      continue
+    alignment.resume(now)
     wz,reason=alignment.command(current_pose(),now,current_odom(),odom.twist.twist.angular.z)
     if reason.startswith('[ALIGN_ODOM_DRIFT]'):
      if state=='ALIGN_YAW':fault('[FINAL_ALIGNMENT_DRIFT] '+reason)
@@ -709,7 +718,7 @@ def main():
      wz,decision=yaw_feedback.command(wrap(target['yaw']-current_pose()[2]),odom.twist.twist.angular.z,stamp,now,source_age(pose.header))
      if now>=next_feedback_log:
       print('[CLOSED_LOOP_YAW] source_age=%.3fs decision=%s yaw_error=%.4f measured_wz=%.4f output_wz=%.4f' % (source_age(pose.header),decision,wrap(target['yaw']-current_pose()[2]),odom.twist.twist.angular.z,wz),flush=True);next_feedback_log=now+.5
-     if decision=='WAIT_SAMPLE':zero();motion_guard.reset();continue
+     if decision=='WAIT_SAMPLE':alignment.pause(now);zero();motion_guard.reset();continue
      if decision in ('INVALID_SAMPLE','STAMP_REGRESSION'):fault('[FEEDBACK_INVALID] '+decision);continue
     if wz==0.:
      if state=='ALIGN_PATH':
@@ -778,10 +787,13 @@ def main():
       print('[POSITION_ATTEMPT] 一次有界接近闭环，最多12秒；0.10至0.15m/s按响应调整，小幅转向修正；按朝向误差预留最终转向时间，不循环位置重试。',flush=True);continue
     print('[SETTLED_CHECK] stable=1.0s action=%s distance=%.3fm yaw_error=%.3frad' % (action,math.hypot(pos[0]-target['x'],pos[1]-target['y']),wrap(target['yaw']-pos[2])),flush=True)
     if action=='REPLAN' and yaw_priority_latched:
-     fault('[FINAL_POSITION_ENVELOPE] 位置超过35cm；停止而不循环位置恢复。');continue
+     recover_terminal('[FINAL_POSITION_ENVELOPE] 停稳复核超过35cm，进行有次数限制的重新接近',now);continue
     if action=='REPLAN':
      reacquire('[STOPPING_POSITION_SHIFT] 停稳且连续1秒新鲜定位确认位置超过0.20m，重新接近目标',now);continue
     if action=='ALIGN_YAW':
+     distance=math.hypot(pos[0]-target['x'],pos[1]-target['y'])
+     if distance>terminal_turn_position_limit(wrap(target['yaw']-pos[2])):
+      recover_terminal('[TURN_POSITION_MARGIN] 转向前位置余量不足，先重规划接近目标',now);continue
      yaw_attempts+=1
      if yaw_attempts>4:fault('[YAW_SETTLE_LIMIT] 已进行4次朝向闭环与停稳复核，仍未达到0.10rad');continue
      yaw_feedback=TerminalYaw()

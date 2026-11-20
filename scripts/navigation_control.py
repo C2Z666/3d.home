@@ -100,6 +100,7 @@ class HeadingAlignment:
         self.target = target
         self.started = self.progress_at = now
         self.best_angle = abs(wrap(target[2]-pose[2]))
+        self.paused_at = None
         self.anchor = pose[:]
         self.odom_anchor = odom_pose[:]
         self.check_goal_position = check_goal_position
@@ -107,6 +108,15 @@ class HeadingAlignment:
         # Preserve an odometry-only outer bound without contradicting the goal envelope.
         initial_distance=math.hypot(pose[0]-target[0],pose[1]-target[1])
         self.odom_drift_limit = position_limit+initial_distance if yaw_priority else .12
+
+    def pause(self, now):
+        if self.paused_at is None:self.paused_at=now
+
+    def resume(self, now):
+        if self.paused_at is not None:
+            duration=max(0.,now-self.paused_at)
+            self.started+=duration;self.progress_at+=duration
+            self.paused_at=None
 
     def diagnostics(self, pose, odom_pose):
         dx,dy = odom_pose[0]-self.odom_anchor[0],odom_pose[1]-self.odom_anchor[1]
@@ -127,12 +137,13 @@ class HeadingAlignment:
             return 0., '[ALIGN_GOAL_SHIFT] 地图中终点距离超过%.2fm，先保持零速并连续复核；' % self.position_limit+details
         if now-self.started >= ALIGN_TIMEOUT:
             return 0., '[ALIGN_TIMEOUT] 终点朝向调整超过45秒'
-        if abs(error) <= self.best_angle-.05:
+        progress_step=max(.005,min(.05,.2*max(0.,self.best_angle-.07)))
+        if abs(error) <= self.best_angle-progress_step:
             self.best_angle, self.progress_at = abs(error), now
         if abs(error) <= YAW_TOLERANCE:
             return 0., ''
         if now-self.progress_at >= ALIGN_PROGRESS_TIMEOUT:
-            return 0., '[ALIGN_NO_PROGRESS] 终点朝向误差连续12秒没有改善0.05rad'
+            return 0., '[ALIGN_NO_PROGRESS] 实际转向累计12秒未取得有效朝向进展（当前阈值%.3frad）' % progress_step
         if self.check_goal_position:
             # Brake before the tolerance boundary; do not reverse while coasting.
             predicted = error - .25*yaw_rate
