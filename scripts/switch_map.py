@@ -11,7 +11,29 @@ SERVICES={
  'navigation_nav2':('nav2_bringup.launch.py','run_nav2.sh',['floor:=lower']),
  'web_observation':('web_view.py','run_web.sh',['--host','0.0.0.0','--port','8767','--scene','old'])}
 
+def web_pids(root, proc_root=Path('/proc')):
+    expected=str(Path(root)/'scripts/web_view.py')
+    found=[]
+    for proc in proc_root.iterdir():
+        if not proc.name.isdigit():continue
+        try:args=proc.joinpath('cmdline').read_bytes().decode().split('\0')
+        except (OSError,UnicodeError):continue
+        if expected in args:found.append(int(proc.name))
+    return found
+
 def stop(name):
+    if name=='web_observation':
+        # Include manually launched viewers absent from the managed PID file.
+        for pid in web_pids(ROOT):
+            try:os.kill(pid,signal.SIGTERM)
+            except ProcessLookupError:continue
+        for _ in range(80):
+            if not web_pids(ROOT):return
+            time.sleep(.1)
+        for pid in web_pids(ROOT):
+            try:os.kill(pid,signal.SIGKILL)
+            except ProcessLookupError:pass
+        return
     pidfile=ROOT/'work'/f'{name}.pid'
     if not pidfile.exists():return
     pid=int(pidfile.read_text());proc=Path('/proc')/str(pid)

@@ -169,12 +169,19 @@ def handler(state,maps,camera,references,ros_now,scene_info,default_scene,previe
                 if url.path=='/floors.js':return self.send(200,(state.root/'web/floors.js').read_bytes(),'text/javascript; charset=utf-8')
                 if url.path=='/preview-costmap':
                     try:
-                        if map_versions.busy(state.root):raise ValueError('地图正在切换')
+                        if map_versions.busy(state.root) or load_scenes(state.root)['scenes'][scene_name]['map_id']!=scene_info[scene_name]['map_id']:raise ValueError('地图版本已改变，等待重连')
+                        if q.get('map_id',[scene_info[scene_name]['map_id']])[0]!=scene_info[scene_name]['map_id']:raise ValueError('代价地图请求版本不匹配')
                         if preview is None:raise ValueError('规划预览未启用')
                         result=preview.costmap_view(scene_name,q.get('floor',['lower'])[0])
                         return self.send(200,json.dumps(result,ensure_ascii=False,allow_nan=False).encode(),'application/json; charset=utf-8')
                     except ValueError as e:
                         return self.send(503,json.dumps({'ok':False,'error':str(e),'code':getattr(e,'code','costmap_unavailable')},ensure_ascii=False).encode(),'application/json; charset=utf-8')
+                if url.path in ('/state','/map.png','/preview-costmap'):
+                    current=load_scenes(state.root)['scenes'].get(scene_name,{})
+                    if map_versions.busy(state.root) or current.get('map_id')!=scene_info[scene_name]['map_id']:
+                        return self.send(503,b'Map version changed; reconnecting','text/plain')
+                    if q.get('map_id',[current.get('map_id')])[0]!=current.get('map_id'):
+                        return self.send(409,b'Map identity mismatch','text/plain')
                 if url.path=='/state':
                     data=state.snapshot(time.monotonic(),ros_now())
                     spec=scene_info[scene_name]
