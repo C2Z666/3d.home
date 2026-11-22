@@ -229,6 +229,35 @@ def certify(points, current, grid, half_length=.50, half_width=.275, goal_yaw=No
     return True,dict(reason='swept_body_clear',checked_segments=len(p)-start,remaining_start_index=start)
 
 
+def corridor_heuristic(body, target, scale=4):
+    """Estimate distance around obstacles on a coarse centre-point grid."""
+    h = (body.h + scale - 1) // scale
+    w = (body.w + scale - 1) // scale
+    # Sampling the centres keeps this grid permissive. It guides search only;
+    # the full-resolution footprint checks remain authoritative.
+    rows = np.minimum(np.arange(h)*scale + scale//2, body.h-1)
+    cols = np.minimum(np.arange(w)*scale + scale//2, body.w-1)
+    blocked = body.data[np.ix_(rows, cols)] >= 253
+    tc = min(w-1, max(0, int(target[0]/body.r)//scale))
+    tr = min(h-1, max(0, int(target[1]/body.r)//scale))
+    distance = np.full((h, w), np.inf)
+    distance[tr, tc] = 0.
+    queue = [(0., tc, tr)]
+    while queue:
+        cost, c, r = heapq.heappop(queue)
+        if cost != distance[r, c]:
+            continue
+        for dc, dr in ((1,0),(-1,0),(0,1),(0,-1),(1,1),(1,-1),(-1,1),(-1,-1)):
+            nc, nr = c+dc, r+dr
+            if not (0 <= nc < w and 0 <= nr < h) or blocked[nr,nc]:
+                continue
+            value = cost + body.r*scale*math.hypot(dc,dr)
+            if value < distance[nr,nc]:
+                distance[nr,nc] = value
+                heapq.heappush(queue, (value,nc,nr))
+    return distance
+
+
 def plan_body(grid, start, goal, half_length=.50, half_width=.275, timeout=8.):
     begin=time.monotonic();body=BodyGrid(grid,half_length,half_width)
     s,t=body.local(start),body.local(goal)
@@ -236,6 +265,7 @@ def plan_body(grid, start, goal, half_length=.50, half_width=.275, timeout=8.):
     if not body.pose_clear(*t):raise ValueError('目标机身或朝向与障碍冲突，请调整目标')
     step=2;dirs=DIRECTIONS
     sc,sr=int(s[0]/body.r),int(s[1]/body.r)
+    guidance=corridor_heuristic(body,t)
     dist={};parent={};queue=[];serial=0
     def pose(state):
         c,r,h=state;return [(c+.5)*body.r,(r+.5)*body.r,ANGLES[h]]
@@ -244,7 +274,10 @@ def plan_body(grid, start, goal, half_length=.50, half_width=.275, timeout=8.):
         if cost>=dist.get(state,float('inf')):return
         dist[state]=cost;parent[state]=prev;serial+=1
         q=pose(state);heur=math.hypot(q[0]-t[0],q[1]-t[1])
-        heapq.heappush(queue,(cost+heur,serial,cost,state))
+        c,r,_=state
+        if 0<=r<body.h and 0<=c<body.w and math.isfinite(guidance[r//4,c//4]):
+            heur=max(heur,float(guidance[r//4,c//4]))
+        heapq.heappush(queue,(cost+3.*heur,serial,cost,state))
     for dc,dr in [(0,0),(-1,0),(1,0),(0,-1),(0,1)]:
         for h in range(len(ANGLES)):
             state=(sc+dc,sr+dr,h);q=pose(state)
@@ -264,7 +297,12 @@ def plan_body(grid, start, goal, half_length=.50, half_width=.275, timeout=8.):
         _,_,cost,state=heapq.heappop(queue)
         if cost!=dist[state]:continue
         expanded+=1;c,r,h=state;q=pose(state)
-        if math.hypot(q[0]-t[0],q[1]-t[1])<.9 and body.connect(q,t,t[2]):end=state;break
+        prev=parent[state]
+        # The reconstructed route omits in-place lattice states. Only finish
+        # after a translation, so the incoming heading matches the last edge.
+        if (prev is not None and prev[:2] != state[:2] and
+                math.hypot(q[0]-t[0],q[1]-t[1])<.9 and body.connect(q,t,t[2])):
+            end=state;break
         for dh in (-1,1):
             nh=(h+dh)%len(ANGLES);field=body.field(h if dh==1 else nh,True)
             if 0<=c<body.w and 0<=r<body.h and not field[r,c]:push((c,r,nh),cost+.10*abs(wrap(ANGLES[nh]-ANGLES[h]))/(math.pi/4),state)

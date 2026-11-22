@@ -8,7 +8,7 @@ import numpy as np
 import cv2
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
-from body_planner import BodyGrid, plan_body, certify, replan_body, ANGLES, preview_body
+from body_planner import BodyGrid, plan_body, certify, replan_body, ANGLES, preview_body, corridor_heuristic
 
 
 def grid(a):
@@ -16,6 +16,22 @@ def grid(a):
 
 
 class BodyPlannerTests(unittest.TestCase):
+    def test_corridor_guidance_accounts_for_wall(self):
+        a=np.zeros((120,160),np.uint8)
+        a[:85,80:84]=254
+        body=BodyGrid(grid(a));target=body.local([6.,2.,0.])
+        distances=corridor_heuristic(body,target)
+        self.assertGreater(distances[10,10],math.dist([2.,2.],[6.,2.])+1.)
+
+    def test_multibend_route_remains_certified(self):
+        a=np.zeros((180,220),np.uint8)
+        a[:140,60:64]=254
+        a[40:,110:114]=254
+        a[:140,160:164]=254
+        start=[1.,2.,0.]; goal=[9.8,2.,0.]; g=grid(a)
+        path,_=plan_body(g,start,goal,timeout=8.)
+        self.assertTrue(certify([[p['x'],p['y']] for p in path],start,g,goal_yaw=0.)[0])
+
     def test_detours_and_independent_polygon_oracle(self):
         a=np.zeros((100,120),np.uint8);a[35:65,55:65]=254
         start=[1,2.5,0];goal=[5,2.5,0]
