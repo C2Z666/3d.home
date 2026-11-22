@@ -6,7 +6,7 @@ import yaml,hashlib
 import numpy as np
 from geometry import imu_from_base,pose_matrix,navigation_pose
 from route_validation import check_route,ReplanPolicy,near_obstacle_action,ClearWindow
-from body_planner import replan_body,departure_heading,PlanningTimeout,turn_drift_margin
+from body_planner import progress_index,replan_body,departure_heading,PlanningTimeout,turn_drift_margin
 from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
 from mission_runtime import RecoveryBudget, MissionTrace
@@ -143,6 +143,7 @@ def main():
  scan_stamp=None;scanhealth={}; health_at=-math.inf; next_wait_log=0.
  costmap=None; costmap_at=-math.inf; alignment=None; motion_guard=MotionGuard(); settled_review=SettledGoalReview(); next_control_log=0.
  raw_controller=None; controller_at=-math.inf; command_missing_at=None
+ route_cursor=0
  pending_message=None; align_halt_at=None
  first_command_seen=False
  reacquire_count=0; planner_goal=None; planner_reply=None; planner_result=None
@@ -335,7 +336,8 @@ def main():
    if not route_costmap.service_is_ready():raise RuntimeError('[PATH_CHECK_UNAVAILABLE] 路径代价地图服务不可用')
    route_future=route_costmap.call_async(GetCostmap.Request());route_requested=now
  def install_body_route(values,certificate):
-  nonlocal background_future,background_ready
+  nonlocal background_future,background_ready,route_cursor
+  route_cursor=0
   if background_future is not None:background_future.cancel()
   background_future=None;background_ready=None
   stamp=n.get_clock().now().to_msg();poses=[]
@@ -348,7 +350,7 @@ def main():
   print('[REPLAN_READY] 已找到绕行路线%d点，等待最新地图复核。'%len(poses),flush=True)
   trace.emit('body_plan',**certificate)
  def poll_route_check(now):
-  nonlocal route_future,route_last_valid,route_details,route_next_check,body_future,body_repaired,body_force,route_grid,pending_replan_charge
+  nonlocal route_cursor,route_future,route_last_valid,route_details,route_next_check,body_future,body_repaired,body_force,route_grid,pending_replan_charge
   if body_future is not None:
    if not body_future.done():return None
    future=body_future;body_future=None
@@ -375,7 +377,9 @@ def main():
   points=[[p.pose.position.x,p.pose.position.y] for p in pending_message.path.poses]
   footprint=json.loads(body['footprint'])
   length=max(abs(p[0]) for p in footprint)+padding;width=max(abs(p[1]) for p in footprint)+padding
-  ok,route_details=check_route(points,current_pose(),grid,length,width,goal_yaw=target['yaw'])
+  pos=current_pose();route_cursor=progress_index(points,pos,route_cursor)
+  points=points[route_cursor:]
+  ok,route_details=check_route(points,pos,grid,length,width,goal_yaw=target['yaw'])
   if state=='ROUTE_CHECK' and route_after!='resume' and not body_repaired and (body_force or not ok):
    body_repaired=True;body_force=False
    body_future=body_executor.submit(replan_body,grid,current_pose(),[target['x'],target['y'],target['yaw']],length,width,points,route_details,root/'work/navigation'/task_id)
@@ -396,14 +400,15 @@ def main():
   request_route_check(time.monotonic())
  def submit_route():queue_route_check('submit')
  def trim_current_route():
+  nonlocal route_cursor
   points=pending_message.path.poses
-  pos=current_pose()
-  nearest=min(range(len(points)),key=lambda i:math.hypot(points[i].pose.position.x-pos[0],points[i].pose.position.y-pos[1]))
-  pending_message.path.poses=points[nearest:]
+  xy=[[p.pose.position.x,p.pose.position.y] for p in points]
+  nearest=progress_index(xy,current_pose(),route_cursor)
+  pending_message.path.poses=points[nearest:];route_cursor=0
  def prepare_route():
   nonlocal alignment,terminal,deadline,halt_at,align_halt_at
   pos=current_pose();points=[dict(x=p.pose.position.x,y=p.pose.position.y) for p in pending_message.path.poses] if approved else []
-  heading=departure_heading([[p['x'],p['y']] for p in points],pos) if approved else pos[2]
+  heading=departure_heading([[p['x'],p['y']] for p in points[route_cursor:]],pos) if approved else pos[2]
   deadline=execution_deadline
   if not turn_replan_route and math.hypot(pos[0]-target['x'],pos[1]-target['y'])<=.25:
    alignment=None;terminal=True;transition('STOPPING');deadline=min(execution_deadline,time.monotonic()+10);halt_at=time.monotonic();zero()
@@ -751,7 +756,7 @@ def main():
        footprint=json.loads(body['footprint'])
        background_future=body_executor.submit(replan_body,route_grid,current_pose(),[target['x'],target['y'],target['yaw']],
         max(abs(p[0]) for p in footprint)+padding,max(abs(p[1]) for p in footprint)+padding,
-        [[p.pose.position.x,p.pose.position.y] for p in pending_message.path.poses],route_details,root/'work/navigation'/task_id)
+        [[p.pose.position.x,p.pose.position.y] for p in pending_message.path.poses[route_cursor:]],route_details,root/'work/navigation'/task_id)
        background_retry_at=now+5.
        print('[DISTANT_OBSTACLE] 障碍持续存在，近段已通过机身复核，后台搜索备选路线。',flush=True)
      elif valid is True:

@@ -73,6 +73,28 @@ class BodyPlannerTests(unittest.TestCase):
         self.assertEqual(info['planner'],'preview_single_bend')
         self.assertTrue(certify([[p['x'],p['y']] for p in path],start,g,goal_yaw=goal[2])[0])
 
+    def test_preview_long_final_corridor(self):
+        cells=np.full((140,180),254,np.uint8)
+        cells[23:57,10:158]=0
+        cells[23:125,125:158]=0
+        start=[1.4,2.,0.];goal=[7.05,5.4,math.pi/2];g=grid(cells)
+        path,info=preview_body(g,start,goal,.50,.275)
+        self.assertEqual(info['planner'],'preview_single_bend')
+        points=[[p['x'],p['y']] for p in path]
+        self.assertTrue(certify(points,start,g,goal_yaw=goal[2])[0])
+        final_leg=[p for p in path if abs(p['yaw']-goal[2])<1e-6]
+        self.assertGreater(goal[1]-final_leg[0]['y'],2.)
+
+    def test_preview_turn_back_out_of_corridor(self):
+        cells=np.full((140,180),254,np.uint8)
+        cells[23:57,10:158]=0
+        cells[23:125,125:158]=0
+        start=[7.05,5.4,math.pi/2];goal=[1.4,2.,math.pi];g=grid(cells)
+        path,info=preview_body(g,start,goal,.50,.275)
+        self.assertEqual(info['planner'],'preview_single_bend')
+        self.assertLess(math.cos(path[0]['yaw']-start[2]),-.9)
+        self.assertTrue(certify([[p['x'],p['y']] for p in path],start,g,goal_yaw=goal[2])[0])
+
     def test_failed_search_snapshot(self):
         a=np.zeros((80,100),np.uint8);a[40,20]=254
         with tempfile.TemporaryDirectory() as directory:

@@ -169,8 +169,42 @@ def remaining_points(points, current):
     return p[start:],start
 
 
+def progress_index(points,current,first=0):
+    """Advance only along successive segments of this route."""
+    p=np.asarray(points)
+    pos=np.asarray(current[:2])
+    best=first;nearest=math.inf;distance=0.
+    for i in range(first,len(p)-1):
+        delta=p[i+1,:2]-p[i,:2]
+        length=float(np.linalg.norm(delta))
+        if length<1e-8:continue
+        f=float(np.clip(np.dot(pos-p[i,:2],delta)/length**2,0.,1.))
+        error=np.linalg.norm(pos-(p[i,:2]+f*delta))
+        if error<nearest-1e-8:
+            best=i+int(f>=1.-1e-8);nearest=error
+        distance+=length
+        if distance>=1.25:break
+    return best
+
+
+def tracking_suffix(points,current):
+    p=np.asarray(points)
+    i=progress_index(p,current)
+    if i==len(p)-1:
+        return p[i:],i
+    # Rejoin the current straight leg ahead, never look through a corner.
+    j=i+1
+    direction=p[j,:2]-p[i,:2]
+    while j<len(p)-1 and np.linalg.norm(p[j,:2]-current[:2])<.35:
+        following=p[j+1,:2]-p[j,:2]
+        if np.dot(direction,following)<=0 or abs(direction[0]*following[1]-direction[1]*following[0])>1e-7:
+            break
+        j+=1
+    return p[j:],j
+
+
 def departure_heading(points,current):
-    p,_=remaining_points(points,current)
+    p,_=tracking_suffix(points,current)
     return math.atan2(p[0,1]-current[1],p[0,0]-current[0]) if np.linalg.norm(p[0,:2]-current[:2])>1e-7 else current[2]
 
 
@@ -179,7 +213,7 @@ def certify(points, current, grid, half_length=.50, half_width=.275, goal_yaw=No
     if p.ndim!=2 or len(p)==0 or p.shape[1]<2 or not np.isfinite(p).all():return False,dict(reason='invalid_path')
     body=grid if isinstance(grid,BodyGrid) else BodyGrid(grid,half_length,half_width)
     cur=body.local(current)
-    remaining,start=remaining_points(p,current) if trim else (p,0)
+    remaining,start=tracking_suffix(p,current) if trim else (p,0)
     clear_distance=0.
     for i,v in enumerate(remaining):
         q=body.local([v[0],v[1],0.])
@@ -223,6 +257,7 @@ def plan_body(grid, start, goal, half_length=.50, half_width=.275, timeout=8.):
             state=(int((s[0]+distance*math.cos(a))/body.r),int((s[1]+distance*math.sin(a))/body.r),h)
             q=pose(state)
             if body.connect(s,q,q[2]):push(state,math.hypot(q[0]-s[0],q[1]-s[1])+.08*abs(wrap(q[2]-s[2])),None)
+    heading_clearance={}
     expanded=0;end=None
     while queue:
         if time.monotonic()-begin>timeout:raise PlanningTimeout('机身约束搜索超时，未发布未经验证的路线')
@@ -239,8 +274,11 @@ def plan_body(grid, start, goal, half_length=.50, half_width=.275, timeout=8.):
         if field[r,c] or field[nr,nc] or field[r+dr,c+dc]:continue
         # Exact centre-cell traversal is cheap and closes diagonal corner gaps.
         if not body.line_clear(q,pose((nc,nr,h)),q[2]):continue
+        if h not in heading_clearance:
+            heading_clearance[h]=cv2.distanceTransform((~field).astype(np.uint8),cv2.DIST_L2,3)*body.r
         clearance=body.clearance[nr,nc]
         soft=1.+2.*max(0.,(.80-clearance)/.80)**2+float(body.data[nr,nc])/252.*.5
+        soft+=3.*max(0.,1.-heading_clearance[h][nr,nc]/.30)**2
         push((nc,nr,h),cost+body.r*step*math.hypot(dc,dr)*soft,state)
     if end is None:raise ValueError('已搜索可达位置与朝向，未找到满足机身及转向约束的绕行路线')
     states=[]
@@ -269,7 +307,9 @@ def plan_body(grid, start, goal, half_length=.50, half_width=.275, timeout=8.):
     points=[body.world(q)[:2] for q in out]
     ok,detail=certify(points,start,body,goal_yaw=goal[2],trim=False)
     if not ok:raise ValueError('候选路线未通过统一连续机身复核: '+str(detail))
-    return dense_route(points,goal),dict(planner='rectangular_lattice',expanded=expanded,compute_sec=time.monotonic()-begin,certified=True)
+    route=certified_dense_route(points,start,goal,body)
+    if route is None:raise ValueError('离散执行路线未通过机身复核')
+    return route,dict(planner='rectangular_lattice',expanded=expanded,compute_sec=time.monotonic()-begin,certified=True)
 
 
 def dense_route(points, goal):
@@ -281,6 +321,27 @@ def dense_route(points, goal):
         result.extend(dict(x=a[0]+(b[0]-a[0])*i/n,y=a[1]+(b[1]-a[1])*i/n,yaw=yaw) for i in range(n))
     result.append(dict(x=goal[0],y=goal[1],yaw=goal[2]))
     return result
+
+def certified_dense_route(points,start,goal,body):
+    route=dense_route(points,goal)
+    xy=[[v['x'],v['y']] for v in route]
+    ok,_=certify(xy,start,body,goal_yaw=goal[2],trim=False)
+    return route if ok else None
+
+
+def body_margin(body, local_xy, angles):
+    """Sample rectangle edges against the distance field for ranking only."""
+    lx=np.linspace(-body.l,body.l,11)
+    wy=np.linspace(-body.b,body.b,7)[1:-1]
+    x=np.r_[lx,lx,0*wy-body.l,0*wy+body.l]
+    y=np.r_[0*lx-body.b,0*lx+body.b,wy,wy]
+    c=np.cos(angles).reshape(-1,1);s=np.sin(angles).reshape(-1,1)
+    cols=np.floor((local_xy[:,0,None]+c*x-s*y)/body.r).astype(int)
+    rows=np.floor((local_xy[:,1,None]+s*x+c*y)/body.r).astype(int)
+    if (cols<0).any() or (cols>=body.w).any() or (rows<0).any() or (rows>=body.h).any():
+        return 0.
+    return max(0.,float(body.clearance[rows,cols].min())-math.sqrt(2)*body.r)
+
 
 def preview_body(grid, start, goal, half_length, half_width, timeout=8.):
     """Try direct and single-bend approaches before searching the heading lattice."""
@@ -301,11 +362,45 @@ def preview_body(grid, start, goal, half_length, half_width, timeout=8.):
                 candidates.append([a,b+sign*offset*np.asarray(direction),b])
             candidates.append([a,(a+b)/2+sign*offset*normal,b])
 
+    # Follow the free corridor backwards from the goal. A blocked section of
+    # this ray also rules out every longer straight approach on the same ray.
+    local_goal = body.local(goal)
+    heading = local_goal[2]
+    backward = -np.array([math.cos(heading), math.sin(heading)])
+    previous = local_goal[:2]
+    spacing = max(.1, 2*body.r)
+    for offset in np.arange(spacing, min(distance, 10.)+1e-9, spacing):
+        approach = local_goal[:2]+offset*backward
+        if not body.line_clear(previous, approach, heading):
+            break
+        corner = body.world([*approach, heading])[:2]
+        candidates.append([a, corner, b])
+        previous = approach
+
+    # Probe departures on both sides of the robot, including a certified
+    # U-turn into the corridor it arrived through. Every leg is driven forward.
+    local_start = body.local(start)
+    step = max(.2, 4*body.r)
+    departure_angles = [local_start[2]+math.pi, local_start[2], *ANGLES]
+    for angle in departure_angles:
+        if not body.turn_clear(local_start, angle):
+            continue
+        direction = np.array([math.cos(angle), math.sin(angle)])
+        previous = local_start[:2]
+        for offset in np.arange(step, min(distance, 8.)+1e-9, step):
+            pivot = local_start[:2]+offset*direction
+            if not body.line_clear(previous, pivot, angle):
+                break
+            candidates.append([a,body.world([*pivot,angle])[:2],b])
+            previous = pivot
+
     # Score the complete centreline against real obstacles before running the
     # more expensive continuous rectangle and pivot checks on the best options.
     ranked = []
     for points in candidates:
         cost = 0.
+        margin = .30
+        previous_angle=start[2]-body.angle
         for p,q in zip(points,points[1:]):
             segment = math.dist(p,q)
             local = np.linspace(body.local([*p,0])[:2], body.local([*q,0])[:2],
@@ -314,16 +409,27 @@ def preview_body(grid, start, goal, half_length, half_width, timeout=8.):
             x,y = cells.T
             if ((x<0)|(y<0)|(x>=body.w)|(y>=body.h)).any() or (body.data[y,x]>=253).any():
                 break
+            angle=math.atan2(q[1]-p[1],q[0]-p[0])-body.angle
+            sweep=wrap(angle-previous_angle)
+            turns=previous_angle+np.linspace(0.,sweep,max(2,math.ceil(abs(sweep)/.15)+1))
+            margin=min(margin,body_margin(body,local,np.array([angle])),
+                       body_margin(body,local[:1],turns))
+            previous_angle=angle
             clearance = body.clearance[y,x]
             cost += segment*(1+4*np.mean(np.maximum(0.,1-clearance/.85)**2))
         else:
-            ranked.append((cost,points))
+            sweep=wrap(goal[2]-body.angle-previous_angle)
+            turns=previous_angle+np.linspace(0.,sweep,max(2,math.ceil(abs(sweep)/.15)+1))
+            margin=min(margin,body_margin(body,local[-1:],turns))
+            ranked.append((cost+18*(.30-margin),points))
     for _, points in sorted(ranked,key=lambda item:item[0]):
         if time.monotonic()-begin > min(1.,timeout/3):
             break
         ok,_ = certify(points,start,body,goal_yaw=goal[2],trim=False)
         if ok:
-            return dense_route(points,goal),dict(planner='preview_direct' if len(points)==2 else 'preview_single_bend',
+            route=certified_dense_route(points,start,goal,body)
+            if route is None:continue
+            return route,dict(planner='preview_direct' if len(points)==2 else 'preview_single_bend',
                                                  compute_sec=time.monotonic()-begin,certified=True)
     remaining = timeout-(time.monotonic()-begin)
     return plan_body(grid,start,goal,half_length,half_width,timeout=remaining)
@@ -335,7 +441,7 @@ def replan_body(grid, start, goal, length, width, reference, detail, snapshot_pr
     body = BodyGrid(grid, length, width)
     try:
         if detail.get('reason') == 'swept_body_blocked' and len(reference) >= 2:
-            remaining, _ = remaining_points(reference, start)
+            remaining, _ = tracking_suffix(reference, start)
             route = np.vstack((start[:2], remaining[:,:2]))
             steps = np.linalg.norm(np.diff(route, axis=0), axis=1)
             route = route[np.r_[True, steps > 1e-6]]
@@ -357,12 +463,25 @@ def replan_body(grid, start, goal, length, width, reference, detail, snapshot_pr
                 cells = np.array([body.local([x,y,0])[:2]/body.r for x,y in samples]).astype(int)
                 if ((cells<0).any() or (cells[:,0]>=body.w).any() or (cells[:,1]>=body.h).any()):continue
                 clearance = body.clearance[cells[:,1],cells[:,0]].min()
-                choices.append((min(.85,clearance),-abs(offset),offset,points))
+                bypass_margin=.30
+                previous_angle=start[2]-body.angle
+                for p,q in zip(points[:3],points[1:4]):
+                    if math.dist(p,q)<1e-8:continue
+                    angle=math.atan2(q[1]-p[1],q[0]-p[0])-body.angle
+                    local=np.linspace(body.local([*p,0])[:2],body.local([*q,0])[:2],
+                                      max(2,math.ceil(math.dist(p,q)/.10)+1))
+                    turns=previous_angle+np.linspace(0.,wrap(angle-previous_angle),20)
+                    bypass_margin=min(bypass_margin,body_margin(body,local,np.array([angle])),
+                                      body_margin(body,local[:1],turns))
+                    previous_angle=angle
+                choices.append((bypass_margin+.1*min(.85,clearance),-abs(offset),offset,points))
             for _,__,offset,points in sorted(choices,key=lambda item:item[:2],reverse=True):
                 if time.monotonic()-begin>1.:break
                 ok,_ = certify(points,start,body,goal_yaw=goal[2],trim=False)
                 if ok:
-                    return dense_route(points,goal),dict(planner='side_detour',offset_m=offset,
+                    route=certified_dense_route(points,start,goal,body)
+                    if route is None:continue
+                    return route,dict(planner='side_detour',offset_m=offset,
                                 compute_sec=time.monotonic()-begin,certified=True)
         return plan_body(grid,start,goal,length,width,timeout=max(1.,8.-(time.monotonic()-begin)))
     except ValueError as error:

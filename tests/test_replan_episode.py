@@ -2,13 +2,26 @@ import sys,unittest
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 from route_validation import ReplanPolicy,check_route,near_obstacle_action,ClearWindow
-from body_planner import PlanningTimeout,remaining_points
+from body_planner import PlanningTimeout,remaining_points,progress_index,tracking_suffix
 import numpy as np,pickle
 
 class Episodes(unittest.TestCase):
  def test_background_path_does_not_turn_back_to_passed_waypoint(self):
   points,index=remaining_points([[0,0],[.1,0],[.2,0]],[.04,0,0])
   self.assertEqual(index,1);self.assertGreater(points[0,0],.04)
+ def test_passed_obstacle_and_corner_rejoin(self):
+  a=np.zeros((100,140),np.uint8);a[40,20]=254
+  grid=dict(width=140,height=100,resolution=.05,origin=[0.,0.,0.],data=a.ravel())
+  points=[[x,2.] for x in np.arange(.5,4.01,.05)]+[[4.,2.05],[4.,2.1]]
+  cursor=0
+  for x in np.arange(.5,3.93,.1):
+   cursor=progress_index(points,[x,2.,0.],cursor)
+  pos=[3.94,2.04,0.]
+  tail,j=tracking_suffix(points[cursor:],pos)
+  self.assertAlmostEqual(tail[0,0],4.)
+  self.assertAlmostEqual(tail[0,1],2.)
+  self.assertTrue(check_route(points[cursor:],pos,grid)[0])
+  self.assertGreaterEqual(progress_index(points,[3.82,2.,0.],cursor),cursor)
  def test_near_obstacle_early_clear_and_deadline(self):
   self.assertEqual(near_obstacle_action(1.,5.,True),"resume")
   self.assertEqual(near_obstacle_action(4.99,5.,False),"wait")
