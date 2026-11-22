@@ -9,6 +9,8 @@ from scene_registry import load_scenes, scene_bundle, scene_list
 from site_identity import verify
 import map_versions
 from floor_routes import load_registry, public_state
+from scan_pose_history import PoseHistory
+from ultrasound_display import MOUNTS, reading, display
 
 def yaw(q):
     return math.atan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z))
@@ -18,11 +20,27 @@ class ViewerState:
         self.root, self.map_id=root,map_id
         self.lock=threading.RLock(); self.values={}; self.trail=collections.deque(maxlen=1000)
         self.session=None; self.epoch=None; self.scene_name=None
+        self.scan_pose_history=PoseHistory()
+        self.uss_history={side:collections.deque(maxlen=100) for side in ("left","right")}
     def select(self,name,map_id):
         with self.lock:
+            if map_id!=self.map_id:self.scan_pose_history.clear()
             self.scene_name=name; self.map_id=map_id
     def put(self,key,value,stamp=None):
-        with self.lock: self.values[key]=(value,time.monotonic(),stamp)
+        with self.lock:
+            now=time.monotonic()
+            if key=='localization':
+                old=self.values.get(key,({},0,None))[0]
+                if any(old.get(k)!=value.get(k) for k in ('session','epoch','map_id')) or value.get('tracking_valid') is not True or value.get('ready') is not True:
+                    self.scan_pose_history.clear()
+            if key=='pose':
+                loc,at,_=self.values.get('localization',({},0,None))
+                if now-at<.6 and loc.get('tracking_valid') is True and loc.get('ready') is True and loc.get('map_id')==self.map_id:
+                    self.scan_pose_history.add(value)
+                else:self.scan_pose_history.clear()
+            if key.startswith('uss_'):
+                self.uss_history[key[4:]].append((dict(value),now,stamp))
+            self.values[key]=(value,now,stamp)
     def snapshot(self,now,rosnow):
         with self.lock:
             out={'map_id':self.map_id,'ros_now':rosnow}
@@ -34,6 +52,32 @@ class ViewerState:
                 out.get('pose_age',99)<.6 and -.1<=out.get('pose_source_age',99)<.6 and loc.get('map_id')==self.map_id)
             out['navigation_ready']=bool(out['pose_current'] and loc.get('ready') is True)
             out['trajectory']=list(self.trail)
+            scan_stamp=self.values.get('scan',(None,0,None))[2]
+            out['scan_stamp']=scan_stamp
+            out['scan_pose']=None
+            out['scan_pose_reason']='等待有效定位和扫描'
+            if scan_stamp is not None and out['navigation_ready'] and out.get('scan_age',99)<.5 and -.1<=out.get('scan_source_age',99)<.5:
+                out['scan_pose'],out['scan_pose_reason']=self.scan_pose_history.at(scan_stamp)
+            out['ultrasound']={}
+            out['ultrasound_mounts']=MOUNTS
+            for side in ('left','right'):
+                value,at,t=self.values.get('uss_'+side,({},0,None))
+                if t is None:continue
+                item=display(value,now-at,rosnow-t)
+                item['stamp']=t
+                item['map_pose'],item['map_pose_reason']=self.scan_pose_history.at(t)
+                item['map_ready']=bool(item['fresh'] and out['navigation_ready'] and item['map_pose'])
+                item['map_distance']=item['distance']
+                item['map_stamp']=t
+                if item['fresh'] and out['navigation_ready'] and not item['map_ready']:
+                    for previous,received,st in reversed(self.uss_history[side]):
+                        # A newer invalid reading must never resurrect an older arc.
+                        if not display(previous,now-received,rosnow-st)['fresh']:break
+                        paired,_=self.scan_pose_history.at(st)
+                        if paired is not None:
+                            item.update(map_pose=paired,map_distance=previous['distance'],map_stamp=st,map_ready=True,map_pose_reason='')
+                            break
+                out['ultrasound'][side]=item
             if self.scene_name:
                 out['floor_state']=public_state(self.root,load_registry(self.root,scene_bundle(self.root,self.scene_name)))
             return out
@@ -135,7 +179,7 @@ def handler(state,maps,camera,references,ros_now,scene_info,default_scene,previe
                     data=state.snapshot(time.monotonic(),ros_now())
                     spec=scene_info[scene_name]
                     if spec['map_id']!=state.map_id or map_versions.busy(state.root):
-                        data.update(pose_current=False,navigation_ready=False,pose=None,trajectory=[],scan=None)
+                        data.update(pose_current=False,navigation_ready=False,pose=None,trajectory=[],scan=None,scan_pose=None)
                     data['map_id']=spec['map_id']
                     if spec['map_id']!=state.map_id:
                         data['floor_state']=public_state(state.root,load_registry(state.root,scene_bundle(state.root,scene_name)))
@@ -152,7 +196,7 @@ def handler(state,maps,camera,references,ros_now,scene_info,default_scene,previe
                     same=site.get('entry_map_id')==spec['map_id']
                     data['validation']={k:bool(same and site.get(k)) for k in ('maps_validated','scan_source_validated')}
                     if q.get('compact',['0'])[0]=='1':
-                        # Keep recent full-resolution poses for scan timestamp interpolation.
+                        # Trajectory is display-only; scan_pose is matched before compacting.
                         data['trajectory']=data.get('trajectory',[])[-30:]
                         data.pop('plan',None)
                         health=data.get('scan_health')
@@ -196,7 +240,7 @@ def main():
     from rclpy.qos import qos_profile_sensor_data
     from geometry_msgs.msg import PoseStamped
     from nav_msgs.msg import Path as NavPath,Odometry
-    from sensor_msgs.msg import LaserScan,Image
+    from sensor_msgs.msg import LaserScan,Image,Range
     from std_msgs.msg import String
     rclpy.init();n=rclpy.create_node('d1_readonly_web')
     def clock():return n.get_clock().now().nanoseconds*1e-9
@@ -247,6 +291,11 @@ def main():
     n.create_subscription(String,'/d1/sdk/d1_motion_status',textmsg('sdk'),1)
     n.create_subscription(PoseStamped,'/d1/localization/pose6d',pose,10)
     n.create_subscription(LaserScan,'/d1/nav/scan',scan,qos_profile_sensor_data)
+    def ultrasound(side):
+        def cb(m):state.put('uss_'+side,reading(m),stamp(m.header))
+        return cb
+    for side in ('left','right'):
+        n.create_subscription(Range,'/uss_driver/uss_'+side+'/range',ultrasound(side),qos_profile_sensor_data)
     n.create_subscription(Odometry,'/d1/localization/odom',odom,10)
     n.create_subscription(NavPath,'/plan',path,1)
     camera_subscription=None
