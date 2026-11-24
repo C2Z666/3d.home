@@ -15,13 +15,19 @@ public:
   {
     VoxelLayer::onInitialize();
     auto node = node_.lock();
+    declareParameter("source_max_age_sec", rclcpp::ParameterValue(0.0));
+    declareParameter("future_tolerance_sec", rclcpp::ParameterValue(0.0));
+    node->get_parameter(name_ + ".source_max_age_sec", source_max_age_);
+    node->get_parameter(name_ + ".future_tolerance_sec", future_tolerance_);
     double memory = 0.0, rate = 0.0;
     node->get_parameter(name_ + ".obstacles.observation_persistence", memory);
     node->get_parameter(name_ + ".obstacles.expected_update_rate", rate);
     if (marking_buffers_.size() != 1 || memory < 0.5 || memory > 30.0 ||
-      rate <= 0.0 || rate > 0.5)
+      rate <= 0.0 || std::abs(rate - source_max_age_) > 1e-9 ||
+      !std::isfinite(source_max_age_) || source_max_age_ < 0.1 || source_max_age_ > 1.0 ||
+      !std::isfinite(future_tolerance_) || future_tolerance_ <= 0.0 || future_tolerance_ > 0.1)
     {
-      throw std::runtime_error("TemporalVoxelLayer requires one obstacles source, bounded memory 0.5..30s and freshness <=0.5s");
+      throw std::runtime_error("TemporalVoxelLayer requires one obstacles source, bounded memory and shared navigation_policy source-age parameters");
     }
     RCLCPP_INFO(logger_, "Live obstacles expire after %.2fs without observations; static layer is independent", memory);
   }
@@ -40,13 +46,12 @@ public:
     }
     // A re-received old cloud is not fresh evidence. During sensor/TF loss,
     // preserve the previous layer and make Nav2 wait instead of clearing it.
-    if (!received || now - latest > 0.5 || latest - now > 0.05) {
+    if (!received || now - latest >= source_max_age_ || latest - now >= future_tolerance_) {
       current_ = false;
-      recovery_since_ = -1.0;
       return;
     }
-    if (recovery_since_ < 0.0) {recovery_since_ = now;}
-    if (now - recovery_since_ < 0.3) {current_ = false; return;}
+    // The supervisor owns the shared advancing-source recovery window.
+    // Do not add an independent 0.3s delay to the same recovered observation.
 
     // ObservationBuffer's persistence limits cloud history, not grid lifetime.
     // Rebuild THIS layer on each update so expired observations also leave its
@@ -66,7 +71,8 @@ public:
     previous_max_x_ = ux; previous_max_y_ = uy;
   }
 private:
-  double recovery_since_ = -1.0;
+  double source_max_age_ = 0.0;
+  double future_tolerance_ = 0.0;
   double previous_min_x_ = std::numeric_limits<double>::max();
   double previous_min_y_ = std::numeric_limits<double>::max();
   double previous_max_x_ = -std::numeric_limits<double>::max();

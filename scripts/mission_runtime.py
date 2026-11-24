@@ -7,6 +7,7 @@ class RecoveryBudget:
         self.counts=dict(data_wait=0,position=0,motion=0)
         self.limits=dict(position=3,motion=3)
         self.wait_started=None;self.wait_total=0.;self.wait_category=None
+        self.phase=None;self.phase_at=None;self.phase_totals=collections.defaultdict(float)
     def request(self,category):
         if category not in self.limits:raise ValueError(category)
         if self.counts[category]>=self.limits[category]:
@@ -16,6 +17,11 @@ class RecoveryBudget:
         if self.wait_started is None:
             self.wait_started=now;self.wait_category=category
             if category=='data':self.counts['data_wait']+=1
+            self.set_phase(now,'input_unavailable')
+    def set_phase(self,now,phase):
+        if self.wait_started is None:return
+        if self.phase_at is not None:self.phase_totals[self.phase]+=max(0.,now-self.phase_at)
+        self.phase=phase;self.phase_at=now
     def wait_used(self,now):
         return self.wait_total+(max(0.,now-self.wait_started) if self.wait_started is not None else 0.)
     def wait_error(self,now):
@@ -23,9 +29,15 @@ class RecoveryBudget:
         if self.wait_used(now)>=60:return '[DATA_WAIT_BUDGET] 累计零速等待超过60秒'
         return ''
     def end_wait(self,now):
+        if self.wait_started is not None:self.set_phase(now,'complete')
         if self.wait_started is not None:self.wait_total+=max(0.,now-self.wait_started)
         self.wait_started=None;self.wait_category=None
-    def snapshot(self,now):return dict(counts=dict(self.counts),limits=dict(self.limits),wait_total_sec=round(self.wait_used(now),2),wait_limit_sec=60)
+        self.phase=None;self.phase_at=None
+    def snapshot(self,now):
+        phases=dict(self.phase_totals)
+        if self.phase_at is not None:phases[self.phase]=phases.get(self.phase,0.)+max(0.,now-self.phase_at)
+        return dict(counts=dict(self.counts),limits=dict(self.limits),wait_total_sec=round(self.wait_used(now),2),wait_limit_sec=60,
+                    wait_phase=self.phase,wait_phase_sec={k:round(v,3) for k,v in phases.items() if k!='complete'})
 
 class ZeroCommandWindow:
     """Reports evidence; never subtracts a bias or changes motion commands."""

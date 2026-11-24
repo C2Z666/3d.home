@@ -1,5 +1,5 @@
 """Real Nav2 planner/controller/BT + synthetic lower platform and SDK state, no hardware sockets."""
-import os,sys,time,json,math,shutil,subprocess,signal,copy
+import os,sys,time,json,math,shutil,subprocess,signal,copy,collections
 from pathlib import Path
 import numpy as np,yaml
 ROOT=Path(__file__).resolve().parents[1];W=Path(sys.argv[1]).resolve();R=W/'fixture';R.mkdir(parents=True,exist_ok=True)
@@ -7,6 +7,14 @@ for folder in ('scripts','config','maps'):
  shutil.copytree(ROOT/folder,R/folder,dirs_exist_ok=True)
 site=yaml.safe_load((R/'config/site.yaml').read_text());site.update(maps_validated=True,scan_source_validated=True)
 (R/'config/site.yaml').write_text(yaml.safe_dump(site))
+if os.environ.get('D1_TEST_SIM_TIME'):
+ cfg=yaml.safe_load((R/'config/nav2.yaml').read_text())
+ cfg['controller_server']['ros__parameters']['FollowPath']['sim_time']=float(os.environ['D1_TEST_SIM_TIME'])
+ (R/'config/nav2.yaml').write_text(yaml.safe_dump(cfg))
+if os.environ.get('D1_TEST_GRANULARITY'):
+ cfg=yaml.safe_load((R/'config/nav2.yaml').read_text())
+ cfg['controller_server']['ros__parameters']['FollowPath']['time_granularity']=float(os.environ['D1_TEST_GRANULARITY'])
+ (R/'config/nav2.yaml').write_text(yaml.safe_dump(cfg))
 if os.environ.get('D1_VOXEL_TEST')=='1':
  cfg=yaml.safe_load((R/'config/nav2.yaml').read_text())
  for key in ('global_costmap','local_costmap'):
@@ -26,8 +34,9 @@ identity=dict(map_id='synthetic_navigation',sha256=hashes(R))
 registry=json.loads((R/'config/scenes.json').read_text(encoding='utf-8'))
 registry['scenes']['old']['map_id']=identity['map_id']
 (R/'config/scenes.json').write_text(json.dumps(registry))
-os.environ.update(ROS_DOMAIN_ID='186',ROS_LOCALHOST_ONLY='1',PYTHONDONTWRITEBYTECODE='1')
+os.environ.update(ROS_DOMAIN_ID=os.environ.get('D1_TEST_DOMAIN_ID','186'),ROS_LOCALHOST_ONLY='1',PYTHONDONTWRITEBYTECODE='1')
 os.environ['RMW_IMPLEMENTATION']='rmw_fastrtps_cpp'
+os.environ.setdefault('FASTRTPS_DEFAULT_PROFILES_FILE',str(ROOT/'tests/fastdds_localhost.xml'))
 import rclpy
 from rclpy.duration import Duration
 from rclpy.qos import qos_profile_sensor_data
@@ -55,6 +64,7 @@ pubs={k:n.create_publisher(t,topic,q) for k,t,topic,q in [
  ('rawlio',Odometry,'/Odometry',qos_profile_sensor_data),('marks',PointCloud2,'/d1/nav/obstacle_points',qos_profile_sensor_data),('clears',PointCloud2,'/d1/nav/clearing_points',qos_profile_sensor_data),
  ('odom',Odometry,'/d1/localization/odom',10),('scan',LaserScan,'/d1/nav/scan',qos_profile_sensor_data)]}
 x=y=yaw=0.;case_start=time.monotonic();actual_vx=actual_wz=0.;trajectory=[];command=Twist();cmd_at=-math.inf;raw_count=0;forwarded=[];all_forwarded=[];actions=[];ready=True
+pose_history=collections.deque(maxlen=100)
 map_dx=0.;shift_enabled=False;drift_enabled=False
 tf_available=True;obstacle=False;motion='Walk';seq=0;request=0;confirmed=0;sequence_at=0;last=time.monotonic();current_case='startup';voxel_stage='mark';temporal_stage='present';last_sensor_pub=-math.inf
 def cmd(m):
@@ -83,12 +93,13 @@ def step():
  if current_case=='slow_turn':wz*=.5
  if current_case=='turn_stall':wz=0.
  if current_case=='motion_retry' and not (W/'motion_retry.log').exists():vx=0.
- elif current_case=='motion_retry' and '[INPUT_PAUSE]' not in (W/'motion_retry.log').read_text():vx=0.
+ elif current_case=='motion_retry' and '[BODY_REPLAN]' not in (W/'motion_retry.log').read_text():vx=0.
  if drift_enabled and abs(wz)>.1:vx=.035
  if current_case=='unexpected_reverse' and abs(wz)>.1:vx=-.10
  x+=vx*math.cos(yaw)*dt;y+=vx*math.sin(yaw)*dt;yaw+=wz*dt
  if shift_enabled:map_dx=max(-.18,map_dx-.03*dt)
  trajectory.append((current_case,x,y,yaw))
+ pose_history.append((now,x,y,yaw))
  stamp=n.get_clock().now().to_msg()
  map_transform.header.stamp=stamp;map_transform.transform.translation.x=map_dx
  if tf_available:map_tf.sendTransform(map_transform)
@@ -118,6 +129,12 @@ def step():
   # During the dynamic test, a temporary object blocks the forward route.
   if current_case in ('dynamic_clear','far_dynamic') and 1.<time.monotonic()-case_start<(12. if current_case=='far_dynamic' else 7.):
    dx=(3. if current_case=='far_dynamic' else 1.2)-x;dy=-y;points=[[math.cos(yaw)*dx+math.sin(yaw)*dy,-math.sin(yaw)*dx+math.cos(yaw)*dy,0.]]
+  if current_case in ('local_bypass','local_tight','blocked_corridor') and x>.10:
+   objects=[(1.2,.25)] if current_case!='blocked_corridor' else [(1.2,float(v)) for v in np.arange(-6.,6.01,.025)]
+   # Construct points at their acquisition pose, matching the delayed header.
+   times=[v[0] for v in pose_history]
+   hx,hy,ha=[float(np.interp(now-.1,times,[v[i] for v in pose_history])) for i in (1,2,3)]
+   points=[[math.cos(ha)*(px-hx)+math.sin(ha)*(py-hy),-math.sin(ha)*(px-hx)+math.cos(ha)*(py-hy),0.] for px,py in objects]
   if current_case not in ('voxel_evidence','temporal_evidence'):pubs['marks'].publish(cloud(points))
   rays=[] if points else [[3.5*math.cos(a),3.5*math.sin(a),0.] for a in np.linspace(-math.pi,math.pi,720)]
   if current_case=='voxel_evidence':
@@ -196,13 +213,13 @@ try:
    assert value==(0 if voxel_stage=='clear' else 254),(voxel_stage,value)
    assert int(d[0,0])==254, 'Static wall must remain'
   reports['voxel_evidence']=results;n.destroy_client(cost);current_case='startup'
- for case in ('far_dynamic','near_yaw','terminal_margin','goal_reached','localization_loss','runtime_limit','approved_path','approved_turn','behind_path','curved_path','slow_turn','turn_stall','unexpected_reverse','operator_cancel','tf_loss','turn_obstacle','visual_shift_turn','terminal_shift','tf_transient','tf_transient_turn','turn_inflation','turn_drift','turn_drift_path','motion_retry','data_retries','map_z_drift','flat_tilt_diagnostic','dynamic_clear'):
+ for case in ('local_bypass','local_tight','blocked_corridor','far_dynamic','near_yaw','terminal_margin','goal_reached','localization_loss','runtime_limit','approved_path','approved_turn','behind_path','curved_path','slow_turn','turn_stall','unexpected_reverse','operator_cancel','tf_loss','turn_obstacle','visual_shift_turn','terminal_shift','tf_transient','tf_transient_turn','turn_inflation','turn_drift','turn_drift_path','motion_retry','data_retries','map_z_drift','flat_tilt_diagnostic','dynamic_clear'):
   if os.environ.get('D1_TEST_CASES') and case not in os.environ['D1_TEST_CASES'].split(','):continue
   margin_shifted=False;current_case=case;case_start=time.monotonic()+1000;tf_available=True;obstacle=False;x=y=yaw=0.;actual_vx=actual_wz=0.;motion='Walk';ready=True;command=Twist();request=confirmed=0;map_dx=0.;shift_enabled=False;drift_enabled=False
-  # The live layer now retains observation clouds for 10s. Clearing grid
+  # The live layer retains observation clouds for 2s. Clearing grid
   # cells alone cannot remove a previous case's still-valid observations.
   if any(isinstance(v,dict) and v.get('result')=='PASS' for v in reports.values()):
-   until=time.monotonic()+10.5
+   until=time.monotonic()+2.5
    while time.monotonic()<until:step()
   for _ in range(30):step()
   # Independent synthetic cases must not inherit marked obstacles from the
@@ -220,9 +237,15 @@ try:
   target_y=.04 if os.environ.get('D1_TEST_WEAK_PLANT')=='1' and case=='approved_path' else .1 if case=='behind_path' else .6 if case=='curved_path' else 0.
   target_yaw=.11 if case=='near_yaw' else 2.05 if case=='terminal_margin' else 2.8 if case=='tf_transient_turn' else 2. if case=='terminal_shift' else math.pi if case in ('slow_turn','visual_shift_turn','turn_drift','turn_drift_path') else 1. if case in ('approved_turn','turn_stall','unexpected_reverse','behind_path','turn_obstacle','turn_inflation') else math.pi/2 if case=='curved_path' else 0.
   runtime=60. if case in ('terminal_margin','far_dynamic') else 20. if case=='near_yaw' else 40. if case in ('map_z_drift','dynamic_clear','flat_tilt_diagnostic') else 40. if os.environ.get('D1_TEST_WEAK_PLANT')=='1' and case=='approved_path' else 60. if case=='data_retries' else 60. if case in ('visual_shift_turn','terminal_shift','tf_transient_turn','turn_drift','turn_drift_path') else 30. if case in ('behind_path','curved_path','slow_turn','tf_transient','motion_retry') else 20. if case in ('approved_path','approved_turn') else 10.
+  if case in ('local_bypass','local_tight','blocked_corridor'):target_x=2.5;runtime=40. if case=='local_bypass' else 18.
   args=['--live','--x',str(target_x),'--y',str(target_y),'--yaw',str(target_yaw),'--max-runtime',str(runtime)]
   route=R/'work/approved_test.path.json';route.parent.mkdir(exist_ok=True)
-  if case=='curved_path':
+  if case=='local_bypass':
+   # A cornered reference whose pivot envelope becomes blocked while a smooth
+   # local trajectory can continue. This is distinct from the harder straight
+   # approach below, whose 10cm pivot reserve is intentionally unchanged in B.
+   vertices=[(0.,0.),(.6,0.),(.8,-.25),(1.6,-.25),(2.5,0.)]
+  elif case=='curved_path':
    vertices=[(0.,0.),(.4,0.),(.65,.25),(.65,.6)]
   else:vertices=[(0.,0.),(target_x,target_y)]
   points=[]
@@ -257,7 +280,12 @@ try:
   for _ in range(20):step()
   logfile.close();log=(W/(case+'.log')).read_text();casecmd=[v for v in forwarded if v[0]==case]
   assert not [v for k,v in actions if k==case], 'Already Walk must not request StandUp'
-  if case=='runtime_limit':
+  if case in ('blocked_corridor','local_tight'):
+   assert process.returncode!=0 and 'MAX_RUNTIME_EXCEEDED' in log,log
+   assert log.count('[BODY_REPLAN]')==1,log
+   assert '[REPLAN_WAIT_CHANGE]' in log,log
+   assert x<.75,('crossed wall',x,log)
+  elif case=='runtime_limit':
    assert process.returncode!=0 and timeout_seen is not None,log
    assert '[START]' in log and '[COUNTDOWN]' in log and 'MAX_RUNTIME_EXCEEDED' in log,log
    assert casecmd,'Timeout case never executed a velocity'
@@ -286,13 +314,16 @@ try:
     assert '[BODY_REPLAN]' in log and '[REPLAN_READY]' in log,log
     assert log.index('[REPLAN_READY]')<log.index('[TRACK_PATH]'),log
    if case=='approved_path':assert '[PATH_RELEASED]' in log,log
-   if case=='far_dynamic':assert '[DISTANT_OBSTACLE]' in log and 'DONE: goal reached and stopped' in log,log
-   if case=='dynamic_clear':assert '[OBSTACLE_WAIT]' in log and ('[REPLAN_READY]' in log or '[OBSTACLE_CLEARED]' in log),log
+   if case=='far_dynamic':assert '[DISTANT_OBSTACLE]' not in log and 'DONE: goal reached and stopped' in log,log
+   if case=='local_bypass':
+    assert '[BODY_REPLAN]' not in log and '[OBSTACLE_WAIT]' not in log,log
+    assert max(abs(py) for k,px,py,w in trajectory if k==case)>.08,'did not steer around obstacle'
+    assert min(math.hypot(px-1.2,py-.25) for k,px,py,w in trajectory if k==case)>.28,'obstacle contact'
    if case=='visual_shift_turn':assert abs(map_dx)>.12 and '[ALIGN_METRICS]' in log,log
    if case=='data_retries':
     assert log.count('[INPUT_RECOVERED]')>=4,log
     assert '[POSITION_RECOVERY_LIMIT]' not in log and '[MOTION_RECOVERY_LIMIT]' not in log,log
-   if case=='motion_retry':assert '[NO_MOTION_RESPONSE]' in log and '[INPUT_RECOVERED]' in log and '[REPLAN_READY]' in log,log
+   if case=='motion_retry':assert '[NO_PROGRESS]' in log and '[REPLAN_READY]' in log,log
    if case=='near_yaw':assert 'ALIGN_NO_PROGRESS' not in log,log
    if case=='terminal_margin':
     assert '[TURN_POSITION_MARGIN]' in log or '[FINAL_POSITION_ENVELOPE]' in log,log
@@ -306,7 +337,8 @@ try:
     assert '[INPUT_PAUSE]' in log and '[INPUT_RECOVERED]' in log and 'ALIGN_NO_PROGRESS' not in log,log
     assert not any(loss_at+.55<v[1]<loss_at+13. for v in casecmd),'Motion while TF stale'
    if case=='tf_transient':
-    assert '[INPUT_PAUSE]' in log and '[INPUT_RECOVERED]' in log and '[REPLAN_READY]' in log,log
+    assert '[INPUT_PAUSE]' in log and '[INPUT_RECOVERED]' in log,log
+    assert '[BODY_REPLAN]' not in log,'input recovery must reuse the route'
     assert not any(loss_at+.55<v[1]<loss_at+.8 for v in casecmd),'Motion while TF stale'
   if case=='curved_path':
    def segment_distance(x,y,a,b):
@@ -317,7 +349,26 @@ try:
    reports['curved_max_cross_track_m']=maximum
   if case=='slow_turn':assert time.monotonic()-start>15.,log
   assert all(-1e-6<=v[2]<=.300001 and abs(v[3])<=.400001 for v in casecmd),casecmd
+  if case in ('local_bypass','local_tight'):
+   for k,px,py,a in trajectory:
+    if k!=case or px<=.10:continue
+    dx,dy=1.2-px,.25-py;c,s=math.cos(a),math.sin(a)
+    assert abs(c*dx+s*dy)>.50 or abs(-s*dx+c*dy)>.275,('body touched point obstacle',case,px,py,a)
   reports[case]=dict(result='PASS',exit_code=process.returncode,final_pose=[x,y,yaw],forwarded_commands=len(casecmd))
+  if case in ('local_bypass','local_tight','blocked_corridor','approved_path','curved_path','tf_transient','motion_retry'):
+   events=[json.loads(v) for v in (R/'work/navigation/approved_test.telemetry.jsonl').read_text().splitlines()]
+   phase=None;local_ms=[]
+   for event in events:
+    if event['kind']=='transition':phase=event['state']
+    if event['kind']=='path_check_timing':assert phase!='NAVIGATE','moving global certification returned'
+    if event['kind']=='sample' and event.get('local_motion',{}).get('compute_ms') is not None:local_ms.append(event['local_motion']['compute_ms'])
+    if event['kind']=='sample' and event['state'] in ('ROUTE_CHECK','OBSTACLE_WAIT'):
+     assert event['commands']['supervised']==[0.,0.],'motion during stationary search/wait'
+   reports[case]['local_check_ms_p50_p95_max']=np.percentile(local_ms,[50,95,100]).tolist() if local_ms else []
+   if case=='local_tight':reports[case]['limitation']='DWB cannot bypass this straight-approach fixture; stop and wait without repeated searches; 10cm pivot reserve unchanged'
+   # Each case uses the same test path id; separate its telemetry before the next one.
+   (R/'work/navigation/approved_test.telemetry.jsonl').rename(W/(case+'.telemetry.jsonl'))
+  print('PASS: '+case,flush=True)
   (W/'report.json').write_text(json.dumps(reports,indent=2))
   process=None
  reports.update(raw_nav2_commands=raw_count,hardware_connected=False,synthetic_floor_only=True,assumed_angular_deadband=.08,bridge_acceleration=[.5,1.])

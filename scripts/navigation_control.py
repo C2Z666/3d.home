@@ -61,8 +61,8 @@ def replan_errors(start, end, current, target, endpoint_tolerance):
 def scan_input_state(health):
     """Return (usable, recoverable, explanation) for the cloud-scan producer.
 
-    Its 0.4s ready deadline can expire before the supervisor's 0.5s reception
-    deadline. That is a reason to hold zero and wait, not a permanent fault.
+    Producer readiness and supervisor scan acceptance share source-age policy.
+    A transient missing/expired observation is waitable, not a permanent fault.
     Explicit malformed clouds/frame errors must never use the stale fallback.
     """
     reason=str(health.get('reason') or '').strip()

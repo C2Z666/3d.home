@@ -10,6 +10,7 @@ from site_identity import verify
 import map_versions
 from floor_routes import load_registry, public_state
 from scan_pose_history import PoseHistory
+from navigation_policy import source_fresh
 from ultrasound_display import MOUNTS, reading, display
 
 def yaw(q):
@@ -56,7 +57,7 @@ class ViewerState:
             out['scan_stamp']=scan_stamp
             out['scan_pose']=None
             out['scan_pose_reason']='等待有效定位和扫描'
-            if scan_stamp is not None and out['navigation_ready'] and out.get('scan_age',99)<.5 and -.1<=out.get('scan_source_age',99)<.5:
+            if out['navigation_ready'] and source_fresh(rosnow,scan_stamp):
                 out['scan_pose'],out['scan_pose_reason']=self.scan_pose_history.at(scan_stamp)
             out['ultrasound']={}
             out['ultrasound_mounts']=MOUNTS

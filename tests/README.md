@@ -1,5 +1,25 @@
 # 测试方法
 
+批次 B：在 Linux / Humble、已编译代价地图插件的独立测试副本中运行：
+
+```bash
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+export PYTHONNOUSERSITE=1 OPENBLAS_NUM_THREADS=1
+mkdir -p work
+python3 -m unittest discover -s tests
+D1_TEST_DOMAIN_ID=197 D1_TEST_CASES=local_bypass,local_tight,blocked_corridor,approved_path,curved_path,tf_transient,motion_retry,approved_turn,turn_obstacle,tf_transient_turn \
+  python3 tests/ros_nav2_mission.py work/batch_b_validation
+```
+
+该 ROS 测试创建单独的 fixture 地图及参数；默认使用
+`tests/fastdds_localhost.xml`，没有 SDKClient 或真实机器人 socket。
+`local_bypass` 验证转弯参考路线可由 DWB 连续通过，不允许停车或重规划；
+`local_tight` 保留直线近障碍场景，验证当前局部/转向约束无法通过时只搜索一次，
+随后安全等待至时限，报告明确标注该限制，不将它计为到达成功。
+`blocked_corridor` 验证整条通路被堵时的同样兜底。
+每个场景记录是否在 NAVIGATE 阶段请求全局认证以及局部检查耗时。
+
 纯逻辑与几何：
 
     /usr/bin/python3 -B -m unittest discover -s tests -p 'test_core.py' -v

@@ -2,6 +2,7 @@ from pathlib import Path
 import yaml, sys
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 from scene_registry import scene_bundle
+from navigation_policy import configure_costmaps
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument,OpaqueFunction
 from launch.substitutions import LaunchConfiguration
@@ -21,7 +22,9 @@ def setup(context):
         state=read_state(root,registry)
         floor=state.get('active_nav_floor') or state.get('actual_floor') or registry['initial_floor']
     floor=registry['floors'][floor_id(registry,floor)]['map_key']
-    cfg=str(root/'config/nav2.yaml'); use_sim=ParameterValue(LaunchConfiguration('use_sim_time'),value_type=bool)
+    runtime=configure_costmaps(yaml.safe_load((root/'config/nav2.yaml').read_text()))
+    params=root/'work/nav2_runtime_params.yaml';params.parent.mkdir(exist_ok=True);params.write_text(yaml.safe_dump(runtime))
+    cfg=str(params); use_sim=ParameterValue(LaunchConfiguration('use_sim_time'),value_type=bool)
     common=[cfg,{'use_sim_time':use_sim}]
     nodes=[Node(package='nav2_map_server',executable='map_server',name='map_server',parameters=[cfg,{'use_sim_time':use_sim,'yaml_filename':str(scene['maps'][floor]['yaml'])}]),
       Node(package='nav2_planner',executable='planner_server',name='planner_server',parameters=common),

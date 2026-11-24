@@ -533,3 +533,16 @@ def replan_body(grid, start, goal, length, width, reference, detail, snapshot_pr
         except (OSError,TypeError,ValueError) as snapshot_error:
             print('[REPLAN_SNAPSHOT_FAILED]',snapshot_error,flush=True)
         raise
+
+
+def timed_replan_body(grid,start,goal,length,width,reference,detail,snapshot_prefix,submitted):
+    started=time.monotonic()
+    try:
+        route,certificate=replan_body(grid,start,goal,length,width,reference,detail,snapshot_prefix)
+    except ValueError as error:
+        error.timing=dict(worker_queue_ms=(started-submitted)*1000,
+                          planning_ms=(time.monotonic()-started)*1000)
+        raise
+    certificate['timing']=dict(worker_queue_ms=(started-submitted)*1000,
+                               planning_ms=(time.monotonic()-started)*1000)
+    return route,certificate

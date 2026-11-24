@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np,yaml
 from geometry import calibration,imu_from_base,pose_matrix,planar,interpolate,transform,LIO_TO_NAV,navigation_pose
 from cloud_pairing import CloudQueue
+from navigation_policy import load_policy, source_fresh
 from clearing_evidence import ClearingEvidence,voxel_sample
 
 
@@ -45,7 +46,7 @@ def project(points,N_L,cfg,diagnostic=None,return_points=False):
 
 def main():
  root=Path(__file__).resolve().parents[1];p=argparse.ArgumentParser();p.add_argument('--config',type=Path,default=root/'config/runtime.yaml');a=p.parse_args()
- c=yaml.safe_load(a.config.read_text(encoding='utf-8'))
+ c=yaml.safe_load(a.config.read_text(encoding='utf-8'));policy=load_policy(root)
  if not isinstance(c.get('cloud_frame'),str) or not c['cloud_frame']:p.error('set runtime.yaml cloud_frame to the observed raw front LiDAR frame')
  if not (0<c['base_height_m']<2 and 0<c['obstacle_min_above_floor_m']<c['obstacle_max_above_floor_m'] and 0<c['range_min_m']<c['range_max_m']):p.error('invalid projection limits')
  _,_,B_L,_=calibration(root/'config/calibration.yaml');I_B=imu_from_base(root/'config/calibration.yaml')
@@ -56,7 +57,7 @@ def main():
  from geometry_msgs.msg import TransformStamped
  from tf2_ros import TransformBroadcaster
  from std_msgs.msg import String
- rclpy.init();n=rclpy.create_node('d1_cloud_scan');history=collections.deque(maxlen=100);pending=None;clouds=CloudQueue()
+ rclpy.init();n=rclpy.create_node('d1_cloud_scan');history=collections.deque(maxlen=100);pending=None;clouds=CloudQueue(policy=policy)
  clear_evidence=ClearingEvidence();sensor_tf=TransformBroadcaster(n)
  marked_pub=n.create_publisher(PointCloud2,'/d1/nav/obstacle_points',qos_profile_sensor_data)
  clear_pub=n.create_publisher(PointCloud2,'/d1/nav/clearing_points',qos_profile_sensor_data)
@@ -64,7 +65,7 @@ def main():
   data=np.asarray(points,dtype='<f4').reshape(-1,3);out=PointCloud2();out.header=copy.deepcopy(header);out.header.frame_id='nav_base'
   out.height=1;out.width=len(data);out.fields=[PointField(name=k,offset=i*4,datatype=PointField.FLOAT32,count=1) for i,k in enumerate(('x','y','z'))]
   out.is_bigendian=False;out.point_step=12;out.row_step=12*len(data);out.is_dense=True;out.data=data.tobytes();return out
- last=-math.inf;fault='waiting for calibrated cloud and odometry';points=0;projection_info={}
+ last=None;fault='waiting for calibrated cloud and odometry';points=0;projection_info={}
  pub=n.create_publisher(LaserScan,'/d1/nav/scan',qos_profile_sensor_data);health=n.create_publisher(String,'/d1/nav/scan_status',1)
  def stamp(h):return h.stamp.sec+h.stamp.nanosec*1e-9
  def odom(m):
@@ -82,7 +83,7 @@ def main():
   if pending is not None:
    m,received_ns=pending;t=stamp(m.header);process_ns=n.get_clock().now().nanoseconds
    if m.header.frame_id!=c['cloud_frame']:fault='raw cloud frame mismatch';pending=None
-   elif abs(n.get_clock().now().nanoseconds*1e-9-t)>.5:fault='stale cloud';pending=None
+   elif not source_fresh(n.get_clock().now().nanoseconds*1e-9,t,policy):fault='stale cloud';pending=None
    elif history and t<=history[-1][0]:
     pending=None
     try:
@@ -101,8 +102,7 @@ def main():
      free=transform(N_L,free)
      tf=TransformStamped();tf.header.stamp=m.header.stamp;tf.header.frame_id='nav_base';tf.child_frame_id='d1_nav_lidar_origin'
      tf.transform.translation.x,tf.transform.translation.y,tf.transform.translation.z=map(float,N_L[:3,3]);tf.transform.rotation.w=1.
-     sensor_tf.sendTransform(tf)
-     marked_pub.publish(points_msg(obstacles,m.header));clear_pub.publish(points_msg(free,m.header))
+     marked=points_msg(obstacles,m.header);cleared=points_msg(free,m.header)
      projection_info.update(marking_points=len(obstacles),clearing_points=len(free),clearing_state=clear_evidence.reason)
      # Bounded paired evidence at exactly the cloud acquisition time.
      body_points=transform(N_B@B_L,xyz)
@@ -113,11 +113,13 @@ def main():
      projection_info.update(source_stamp=t,near_front_count=len(selected),near_front_base=sample.round(4).tolist(),near_front_odom=paired.round(4).tolist(),assumed_base_height_m=c['base_height_m'])
      out=LaserScan();out.header.stamp=m.header.stamp;out.header.frame_id='nav_base'
      out.angle_min=-math.pi;out.angle_increment=2*math.pi/720;out.angle_max=math.pi-out.angle_increment
-     out.range_min=float(c['range_min_m']);out.range_max=float(c['range_max_m']);out.ranges=ranges.tolist();publish_ns=n.get_clock().now().nanoseconds;pub.publish(out)
-     projection_info["scan_timing"]=dict(source_ns=m.header.stamp.sec*10**9+m.header.stamp.nanosec,cloud_received_ns=received_ns,process_start_ns=process_ns,publish_ns=publish_ns)
-     last=time.monotonic();fault=''
+     out.range_min=float(c['range_min_m']);out.range_max=float(c['range_max_m']);out.ranges=ranges.tolist();publish_ns=n.get_clock().now().nanoseconds
+     if not source_fresh(publish_ns*1e-9,t,policy):raise ValueError('stale cloud')
+     sensor_tf.sendTransform(tf);marked_pub.publish(marked);clear_pub.publish(cleared);pub.publish(out)
+     projection_info["scan_timing"]=dict(source_ns=m.header.stamp.sec*10**9+m.header.stamp.nanosec,cloud_received_ns=received_ns,process_start_ns=process_ns,publish_ns=publish_ns,queue_depth=len(clouds.items),pair_wait_ms=(process_ns-received_ns)/1e6,processing_ms=(publish_ns-process_ns)/1e6)
+     last=t;fault=''
     except Exception as e:fault=str(e)
-  health.publish(String(data=json.dumps(dict(ready=time.monotonic()-last<.4,reason=fault,finite_input_points=points,**projection_info))))
+  health.publish(String(data=json.dumps(dict(ready=not fault and source_fresh(n.get_clock().now().nanoseconds*1e-9,last,policy),reason=fault,finite_input_points=points,queue_depth=len(clouds.items),accepted_source_stamp=last,source_max_age_sec=policy['observation_source_max_age_sec'],**projection_info))))
  n.create_subscription(Odometry,c['odom_topic'],odom,qos_profile_sensor_data);n.create_subscription(PointCloud2,c['cloud_topic'],cloud,qos_profile_sensor_data);n.create_timer(.04,tick)
  try:rclpy.spin(n)
  except KeyboardInterrupt:pass

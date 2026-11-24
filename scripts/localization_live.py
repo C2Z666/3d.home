@@ -6,6 +6,7 @@ import numpy as np,cv2
 from scipy.spatial.transform import Rotation
 from geometry import navigation_pose,calibration,imu_from_base,pose_matrix,planar,interpolate
 from fusion_policy import FusionPolicy
+from visual_schedule import VisualSchedule
 from scene_registry import scene_bundle
 from site_identity import verify
 import logging
@@ -63,7 +64,7 @@ def main():
     history=collections.deque(maxlen=2000); fusion=FusionPolicy(); session=str(uuid.uuid4())
     image_info={}; image_at=-math.inf
     latest=None; received=-math.inf; fault=''; sequence=0; image_queue=queue.Queue(maxsize=1); results=queue.Queue()
-    stop=threading.Event(); pending=[]; last_query=-math.inf
+    stop=threading.Event(); pending=[]; schedule=VisualSchedule();schedule.request(time.monotonic(),explicit=True)
     visual_info={}; sdk={}; sdk_at=-math.inf; recovery_until=0.; recovery_after=-math.inf
     graph_error=''; graph_at=-math.inf; last_state_key=None
     next_correction_log=0.
@@ -110,7 +111,7 @@ def main():
         nonlocal recovery_until,recovery_after
         audit_graph(); reason=recovery_blocker()
         if reason: res.success=False; res.message=reason; return res
-        fusion.request(); recovery_until=time.monotonic()+30; recovery_after=ros_seconds()
+        fusion.request();schedule.request(time.monotonic(),explicit=True); recovery_until=time.monotonic()+30; recovery_after=ros_seconds()
         res.success=True; res.message=json.dumps(dict(message='stationary relocalization armed for 30s; keep robot still',session=session,epoch=fusion.epoch,map_id=map_id))
         return res
     def setpose(p,T):
@@ -130,7 +131,7 @@ def main():
             fid=floor_id(registry,request.get('floor_id'))
             from manual_initialization import alignment
             transform=alignment(request,latest[1],map_id)
-            fusion.initialize_manual(transform,ros_seconds())
+            fusion.initialize_manual(transform,ros_seconds());schedule.confirmed()
             pending.clear()
             write_state(root,registry,actual_floor=fid,active_nav_floor=None,target_floor=None,
                         phase='ON_FLOOR',connection_id=None,source='manual_initial_pose',
@@ -170,6 +171,7 @@ def main():
                     t<saved['stamp'] or np.linalg.norm(delta[:3,3])>.1 or
                     Rotation.from_matrix(delta[:3,:3]).magnitude()>.1):raise ValueError('checkpoint stale or odometry changed')
                 fusion.initialize_manual(np.array(saved['alignment']),ros_seconds())
+                schedule.confirmed()
                 fusion.alignment_source='restart_checkpoint'
                 print('[ALIGNMENT_RESTORED] 已核对同一连续里程计，保留重启前地图对齐',flush=True)
             except (OSError,ValueError,KeyError) as e:
@@ -188,27 +190,29 @@ def main():
         tf.sendTransform([trans('map','nav_odom',Q@np.linalg.inv(P),m.header.stamp),trans('nav_odom','nav_base',P,m.header.stamp)])
         pose=PoseStamped(); pose.header.frame_id='map'; pose.header.stamp=m.header.stamp; setpose(pose.pose,M); posepub.publish(pose)
     def onimage(m):
-        nonlocal last_query,image_info,image_at
+        nonlocal image_info,image_at
         image_info=dict(width=m.width,height=m.height,encoding=m.encoding); image_at=time.monotonic()
         t=seconds(m.header)
-        if fault or t-last_query<.2 or abs(ros_seconds()-t)>.5: return
+        if fault or abs(ros_seconds()-t)>.5: return
         if m.width!=1920 or m.height!=1080 or m.encoding not in ('bgr8','rgb8'): return
-        last_query=t
         if image_queue.full():
             try: image_queue.get_nowait()
             except queue.Empty: pass
         image_queue.put_nowait(m)
     def worker():
         while not stop.is_set():
+            if not schedule.ready(time.monotonic()):
+                stop.wait(.05);continue
             try: m=image_queue.get(timeout=.2)
             except queue.Empty: continue
-            begin=time.monotonic()
+            if fault or abs(ros_seconds()-seconds(m.header))>.5:continue
+            begin=time.monotonic();schedule.started(begin)
             try:
                 im=cv.imgmsg_to_cv2(m,desired_encoding='bgr8')
                 im=cv2.remap(cv2.resize(im,(960,540)),mx,my,cv2.INTER_LINEAR)
                 profile=active_matching_profile(fusion.T is not None,args.matching_profile)
                 result=loc.locate(im,seconds(m.header),profile=profile)
-                info=dict(loc.last_diagnostic); info.update(stamp=seconds(m.header),compute_sec=time.monotonic()-begin)
+                info=dict(loc.last_diagnostic); info.update(stamp=seconds(m.header),compute_sec=time.monotonic()-begin,worker_start_monotonic=begin)
                 results.put((seconds(m.header),result['pose'] if result else None,time.monotonic(),info))
             except Exception as e:
                 results.put((seconds(m.header),None,time.monotonic(),dict(stamp=seconds(m.header),reason='visual worker: '+str(e),compute_sec=time.monotonic()-begin)))
@@ -236,6 +240,8 @@ def main():
                     if fusion.recovering and t<recovery_after: reason='image predates relocalization request'
                     else:
                         info['accepted']=fusion.update(V,O,t); reason=fusion.reason
+                        if info['accepted']:schedule.confirmed()
+                        elif fusion.candidates:schedule.request(time.monotonic())
                 except ValueError as e: reason='odometry bracket: '+str(e)
             info.update(reason=reason,delta_m=fusion.delta_m,delta_deg=fusion.delta_deg,epoch=fusion.epoch)
             visual_info=info; audit.info(json.dumps(dict(session=session,map_id=map_id,**info),allow_nan=False))

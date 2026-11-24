@@ -8,6 +8,7 @@ stop=types.ModuleType('project_stop')
 exec(compile(source,str(root/'scripts/stop.sh'),'exec'),stop.__dict__)
 class Shutdown(unittest.TestCase):
  def test_exact_scope(self):
+  self.assertEqual(stop.classify(['planner_server','--params-file',str(root/'work/nav2_runtime_params.yaml')]),'navigation')
   self.assertEqual(stop.classify(['python3',str(root/'scripts/cloud_scan.py')]),'scan')
   self.assertIsNone(stop.classify(['ssh','robot@host']))
   self.assertIsNone(stop.classify(['bash','-c','cat '+str(root/'scripts/cloud_scan.py')]))

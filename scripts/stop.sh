@@ -30,6 +30,7 @@ def classify(argv,root=ROOT):
     for name,role in [('nav2.yaml','navigation')]:
         if str(root/'config'/name) in argv:return role
     if str(root/'work/planner_preview_params.yaml') in argv:return 'planner'
+    if str(root/'work/nav2_runtime_params.yaml') in argv:return 'navigation'
     if argv and argv[0] in TARGETS.get('executables',[]):return 'legacy'
     for arg in argv:
         if any(arg.startswith(prefix.rstrip('/')+'/') for prefix in TARGETS.get('legacy_roots',[])):return 'legacy'

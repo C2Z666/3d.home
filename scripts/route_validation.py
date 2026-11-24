@@ -1,6 +1,7 @@
 """Shared swept body rules and bounded recovery of one stalled episode."""
-import math
-from body_planner import certify
+import math,time
+from body_planner import certify,BodyGrid
+from navigation_policy import FreshWindow
 
 def bounded_route(points, current, distance_limit=3., point_limit=80):
     """Keep the contiguous route prefix without skipping intermediate bends."""
@@ -30,36 +31,41 @@ def bounded_route(points, current, distance_limit=3., point_limit=80):
 def check_route(points,current,grid,half_length=.50,half_width=.275,goal_yaw=None):
     return certify(points,current,grid,half_length,half_width,goal_yaw=goal_yaw)
 
+def timed_check_route(points,current,grid,half_length,half_width,goal_yaw,submitted):
+    started=time.monotonic()
+    body=BodyGrid(grid,half_length,half_width)
+    built=time.monotonic()
+    valid,details=certify(points,current,body,goal_yaw=goal_yaw)
+    ended=time.monotonic()
+    details['timing']=dict(worker_queue_ms=(started-submitted)*1000,
+                          distance_field_ms=(built-started)*1000,
+                          geometry_ms=(ended-built)*1000,worker_ms=(ended-started)*1000)
+    return valid,details
+
 def near_obstacle_action(elapsed, limit, route_valid):
-    if route_valid is True:
+    if route_valid is True or route_valid == 'CLEAR_CONFIRMED':
         return 'resume'
-    if route_valid is False and elapsed >= limit:
+    if (route_valid is False or route_valid == 'BLOCKED') and elapsed >= limit:
         return 'replan'
     return 'wait'
 
 class ClearWindow:
     """Require successive clear checks backed by advancing scan and map stamps."""
-    def __init__(self):
-        self.reset()
+    def __init__(self,duration=None):
+        self.window=FreshWindow(duration)
 
     def reset(self):
-        self.first=None
-        self.previous=None
+        self.window.reset()
 
     def observe(self, now, map_stamp, scan_stamp, clear):
-        if not clear or not map_stamp or not scan_stamp:
-            self.reset()
-            return False
-        if self.previous:
-            last, old_map, old_scan=self.previous
-            if now-last>.5 or map_stamp<old_map or scan_stamp<old_scan:
-                self.reset()
-            elif map_stamp==old_map or scan_stamp==old_scan:
-                return False
-        if self.first is None:
-            self.first=now
-        self.previous=(now,map_stamp,scan_stamp)
-        return now-self.first>=.5
+        return self.window.observe(now,(map_stamp,scan_stamp),bool(clear and map_stamp and scan_stamp))
+
+    def classify(self,now,map_stamp,scan_stamp,clear):
+        if clear is None or not map_stamp or not scan_stamp:
+            self.reset();return 'DATA_UNAVAILABLE'
+        if clear is False:
+            self.reset();return 'BLOCKED'
+        return 'CLEAR_CONFIRMED' if self.observe(now,map_stamp,scan_stamp,True) else 'CLEAR_PENDING'
 
 
 class ReplanPolicy:

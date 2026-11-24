@@ -65,13 +65,13 @@ class Episodes(unittest.TestCase):
   self.assertEqual(near_obstacle_action(5.,5.,False),"replan")
   self.assertEqual(near_obstacle_action(5.,5.,None),"wait")
  def test_confirm_then_new_block(self):
-  w=ClearWindow()
+  w=ClearWindow(duration=.5)
   for t,stamp in [(3,10),(3.25,11)]:self.assertFalse(w.observe(t,stamp,stamp,True))
   self.assertTrue(w.observe(3.5,12,12,True))
   self.assertFalse(w.observe(4.,13,13,False))
   self.assertEqual(near_obstacle_action(.5,5.,False),'wait')
  def test_flicker_duplicate_and_gap(self):
-  w=ClearWindow()
+  w=ClearWindow(duration=.5)
   for t,m,s,ok in [(0,1,1,True),(.25,2,2,False),(.4,3,3,True),(.7,4,3,True),
                     (1.1,5,4,True),(1.3,5,5,True)]:
    self.assertFalse(w.observe(t,m,s,ok))

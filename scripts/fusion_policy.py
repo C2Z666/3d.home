@@ -3,6 +3,7 @@ import math
 import numpy as np
 from scipy.spatial.transform import Rotation, Slerp
 from geometry import rigid
+from navigation_policy import load_policy
 
 
 class FusionPolicy:
@@ -14,6 +15,7 @@ class FusionPolicy:
         self.recovering = False
         self.visual_stale = True
         self.candidates = []
+        self.consistency_sec = load_policy()['visual_consistency_sec']
         self.last_query = -math.inf
         self.reason = 'waiting for three consistent visual observations'
         self.delta_m = self.delta_deg = None
@@ -60,7 +62,7 @@ class FusionPolicy:
         self.visual_stale = self.last_visual is None or t-self.last_visual >= ttl
 
     def consistent(self, V, O, C, t):
-        self.candidates = [(a, B) for a, B in self.candidates if 0 < t-a <= 2.]
+        self.candidates = [(a, B) for a, B in self.candidates if 0 < t-a <= self.consistency_sec]
         if self.candidates:
             d = np.linalg.inv(self.candidates[0][1] @ O) @ V
             if np.linalg.norm(d[:3,3]) > .25 or Rotation.from_matrix(d[:3,:3]).magnitude() > np.deg2rad(10):
@@ -83,7 +85,7 @@ class FusionPolicy:
             self.delta_deg = float(np.rad2deg(Rotation.from_matrix(delta[:3,:3]).magnitude()))
         if self.T is None or self.recovering:
             if not self.consistent(V, O, C, t):
-                self.reason = 'consistent visual candidates %d/3 within 2s' % len(self.candidates)
+                self.reason = 'consistent visual candidates %d/3 within %gs' % (len(self.candidates),self.consistency_sec)
                 return False
             self.T = C
             self.target = None

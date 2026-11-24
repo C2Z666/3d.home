@@ -5,11 +5,14 @@ from pathlib import Path
 import yaml,hashlib
 import numpy as np
 from geometry import imu_from_base,pose_matrix,navigation_pose
-from route_validation import check_route,bounded_route,ReplanPolicy,near_obstacle_action,ClearWindow
-from body_planner import progress_index,replan_body,departure_heading,PlanningTimeout,turn_drift_margin
+from route_validation import timed_check_route,bounded_route,ReplanPolicy,ClearWindow
+from local_motion import LocalGrid,stopping_sweep
+from local_avoidance import LocalProgress,SearchGate
+from body_planner import progress_index,timed_replan_body,departure_heading,PlanningTimeout,turn_drift_margin
 from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
 from mission_runtime import RecoveryBudget, MissionTrace
+from navigation_policy import load_policy,source_fresh,FreshWindow,follow_path_failure
 from terminal_feedback import TerminalApproach, TerminalYaw, terminal_turn_position_limit
 from turn_recovery import TurnWait
 from navigation_control import HeadingAlignment, MotionGuard, swept_rotation_clearance, quaternion_yaw, wrap, initial_path_heading, scan_input_state, POSITION_TOLERANCE, POSITION_RELEASE, replan_errors, settled_goal_action, SettledGoalReview, RECOVERABLE_INPUT_PHASES
@@ -41,12 +44,12 @@ class WalkGate:
 
 def main():
  root=Path(__file__).resolve().parents[1]; cfg=yaml.safe_load((root/'config/site.yaml').read_text())
+ policy=load_policy(root);input_window=FreshWindow(policy['recovery_stable_sec'])
  replan_cfg=yaml.safe_load((root/'config/replan.yaml').read_text())
- replan_radius=float(replan_cfg['replan_radius_m'])
- near_wait=float(replan_cfg.get('near_obstacle_wait_sec',5.))
- if not math.isfinite(near_wait) or near_wait<0:raise ValueError('invalid near_obstacle_wait_sec')
- if not math.isfinite(replan_radius) or replan_radius<1.2:
-  raise ValueError('replan_radius_m 必须为至少 1.2 m 的有限数值')
+ local_progress=LocalProgress(replan_cfg['local_unavailable_sec'],replan_cfg['no_progress_sec'],replan_cfg['progress_distance_m'])
+ if not .05<=replan_cfg['stop_reaction_sec']<=1.:raise ValueError('invalid stop_reaction_sec')
+ search_gate=SearchGate();progress_distance=0.
+ obstacle_inputs=FreshWindow(policy['recovery_stable_sec'])
  nav_cfg=yaml.safe_load((root/'config/nav2.yaml').read_text())
  runtime_cfg=yaml.safe_load((root/'config/runtime.yaml').read_text());I_B=imu_from_base(root/'config/calibration.yaml');raw_geometry={}
  endpoint_tolerance=float(nav_cfg['planner_server']['ros__parameters']['GridBased']['tolerance'])
@@ -56,6 +59,10 @@ def main():
  if 'RotateToGoal' in nav_cfg['controller_server']['ros__parameters']['FollowPath']['critics']:raise ValueError('Final yaw belongs to supervisor; disable DWB RotateToGoal')
  body=nav_cfg['local_costmap']['local_costmap']['ros__parameters']
  padding=body['footprint_padding']
+ footprint=json.loads(body['footprint'])
+ half_length=max(abs(p[0]) for p in footprint)+padding;half_width=max(abs(p[1]) for p in footprint)+padding
+ dwb=nav_cfg['controller_server']['ros__parameters']['FollowPath']
+ stop_decel=abs(dwb['decel_lim_x']);stop_angular_decel=abs(dwb['decel_lim_theta'])
  p=argparse.ArgumentParser(description=__doc__); p.add_argument('--live',action='store_true',required=True)
  for key in ('x', 'y', 'yaw'):
   p.add_argument('--' + key, type=float, required=True)
@@ -103,7 +110,7 @@ def main():
   p.error('review the selected map and current scan, then run validate_site.py')
  import rclpy
  from rclpy.node import Node
- from rclpy.qos import qos_profile_sensor_data
+ from rclpy.qos import qos_profile_sensor_data,QoSProfile,DurabilityPolicy
  from rclpy.action import ActionClient
  from geometry_msgs.msg import PoseStamped,Twist
  from nav_msgs.msg import Odometry,OccupancyGrid
@@ -128,12 +135,12 @@ def main():
  client=ActionClient(n,FollowPath,'/follow_path')
  planner=ActionClient(n,ComputePathToPose,'/compute_path_to_pose')
  route_costmap=n.create_client(GetCostmap,'/global_costmap/get_costmap')
- body_executor=ProcessPoolExecutor(max_workers=1,mp_context=multiprocessing.get_context("spawn"));body_future=None;body_repaired=False;body_force=False
+ body_executor=ProcessPoolExecutor(max_workers=1,mp_context=multiprocessing.get_context("spawn"));body_future=None;body_context=None;body_repaired=False;body_force=False
  check_executor=ProcessPoolExecutor(max_workers=1,mp_context=multiprocessing.get_context("spawn"));check_future=None;check_context=None
- route_future=None;route_requested=0.;route_next_check=0.;route_last_valid=None;route_after='prepare';route_details={}
- pending_replan_charge=False
- background_future=None;background_ready=None;background_retry_at=0.;route_grid=None
- replan_policy=ReplanPolicy(max_attempts=replan_cfg.get('max_replan_attempts',8));obstacle_at=None;near_block=False;clear_window=ClearWindow();obstacle_force_replan=False
+ route_future=None;route_requested=0.;route_next_check=0.;route_last_valid=None;route_after='prepare';route_details={};route_timing={}
+ route_grid=None;search_wait_logged=False;blocked_command=None;block_confirmed=False;local_motion_details={}
+ local_grid=None;static_map=None
+ replan_policy=ReplanPolicy(max_attempts=replan_cfg.get('max_replan_attempts',8));obstacle_at=None;clear_window=ClearWindow();obstacle_force_replan=False
  sdk={}; loc={}; pose=None; raw=None; odom=None
  sdk_at=loc_at=pose_at=raw_at=odom_at=scan_at=-math.inf
  sdk_identity=None; loc_identity=None; walk_gate=WalkGate()
@@ -148,13 +155,13 @@ def main():
  pending_message=None; align_halt_at=None
  first_command_seen=False
  reacquire_count=0; planner_goal=None; planner_reply=None; planner_result=None
- route_reply=None; paused_state=None; stable_since=None; paused_sequence=None; paused_stamp=None; paused_at=None
+ route_reply=None; paused_state=None; paused_sequence=None; paused_stamp=None; paused_at=None
  next_turn_check_log=0.
- turn_wait=None; turn_replan_route=False
+ turn_wait=None; turn_replan_route=False;turn_state='CLEAR'
  budget=RecoveryBudget();pause_category='data';next_sample=0.;last_sent=(0.,0.);raw_lio=None;raw_lio_at=-math.inf
  task_id=args.path_file.name.removesuffix('.path.json') if args.path_file else 'cli-'+str(os.getpid())
  trace=MissionTrace(root/'work/navigation',task_id)
- trace.emit('mission',goal=target,scene=args.scene,map_id=map_id,max_runtime=args.max_runtime,source_hashes={name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in ('scripts/navigate_to_goal.py','scripts/mission_runtime.py','config/calibration.yaml','config/nav2.yaml')},bridge_actual_semantics='normalized SDK Move request; transport counters do not prove physical execution')
+ trace.emit('mission',goal=target,scene=args.scene,map_id=map_id,max_runtime=args.max_runtime,source_hashes={name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in ('scripts/navigate_to_goal.py','scripts/mission_runtime.py','config/calibration.yaml','config/nav2.yaml','config/navigation_policy.yaml','config/replan.yaml')},bridge_actual_semantics='normalized SDK Move request; transport counters do not prove physical execution')
  def transition(next_state,reason=''):
   nonlocal state,raw,raw_at,command_missing_at,first_command_seen,yaw_priority_latched,terminal_started
   old=state
@@ -198,7 +205,7 @@ def main():
   t=odom.twist.twist if odom else None
   trace.sample(state=state,recovery=budget.snapshot(now),goal=target,
    geometry=dict(raw_geometry,map_z=pose.pose.position.z if pose else None,start_map_z=target['z'],diagnostic_only=True),
-   path_check=route_details,obstacle_replans=replan_policy.attempts,
+   path_check=route_details,local_motion=local_motion_details,search_busy=search_gate.busy,obstacle_replans=replan_policy.attempts,
    map_pose=current_pose() if pose else None,odom_pose=current_odom() if odom else None,
    raw_fastlio=raw_lio,correction=loc.get('correction'),localization_mode=loc.get('mode'),tracking_fault=loc.get('tracking_fault'),
    commands=dict(dwb=None if raw_controller is None else [raw_controller.linear.x,raw_controller.angular.z],smoothed=None if raw is None else [raw.linear.x,raw.angular.z],supervised=list(last_sent),bridge_actual=None if sdk.get('sdk_move_normalized_lr_fb_yaw') is None else dict(normalized_lr_fb_yaw=sdk['sdk_move_normalized_lr_fb_yaw'],sequence=sdk.get('move_sequence'),age_sec=sdk.get('move_age_sec'),write_ok=sdk.get('move_write_ok'),write_failed=sdk.get('move_write_failed'))),
@@ -267,9 +274,14 @@ def main():
   nonlocal raw_controller,controller_at
   raw_controller=m;controller_at=time.monotonic()
  def on_costmap(m):
-  nonlocal costmap,costmap_at
+  nonlocal costmap,costmap_at,local_grid
   if m.header.frame_id=='nav_odom' and -.05<stamp_age(m.header)<.5:
-   costmap=m;costmap_at=time.monotonic()
+   try:converted=LocalGrid(m)
+   except (ValueError,TypeError):return
+   costmap=m;local_grid=converted;costmap_at=time.monotonic()
+ def on_static_map(m):
+  nonlocal static_map
+  if m.header.frame_id=='map':static_map=m
  def on_odom(m):
   nonlocal odom,odom_at
   if m.header.frame_id=='nav_odom' and m.child_frame_id=='nav_base' and -.05<stamp_age(m.header)<.4: odom=m; odom_at=time.monotonic()
@@ -279,8 +291,8 @@ def main():
   callback_ns=n.get_clock().now().nanoseconds
   delta=(callback_ns-key)*1e-9
   if m.header.frame_id!='nav_base':reason='wrong_frame'
-  elif delta<=-.05:reason='future_stamp'
-  elif delta>=.4:reason='source_stale'
+  elif delta<=-policy['future_tolerance_sec']:reason='future_stamp'
+  elif not source_fresh(callback_ns*1e-9,key*1e-9,policy):reason='source_stale'
   elif scan_stamp is not None and key<=round(scan_stamp*1e9):reason='out_of_order'
   elif len(m.ranges)!=720:reason='wrong_beam_count'
   else:
@@ -299,6 +311,7 @@ def main():
  n.create_subscription(Twist,'/d1/nav/cmd_vel_smoothed',on_raw,1)
  n.create_subscription(Twist,'/d1/nav/cmd_vel_raw',on_controller,1)
  n.create_subscription(OccupancyGrid,'/local_costmap/costmap',on_costmap,1)
+ n.create_subscription(OccupancyGrid,'/map',on_static_map,QoSProfile(depth=1,durability=DurabilityPolicy.TRANSIENT_LOCAL))
  n.create_subscription(Odometry,'/d1/localization/odom',on_odom,1)
  from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
  latest_scan_qos=QoSProfile(depth=1,reliability=ReliabilityPolicy.BEST_EFFORT,durability=DurabilityPolicy.VOLATILE)
@@ -323,7 +336,7 @@ def main():
   # while waiting for the next route's acceptance callback.
   goal=None;result=None;terminal=False
   transition('ACCEPT');raw=None;raw_at=-math.inf;command_missing_at=None;first_command_seen=False
-  motion_guard.reset()
+  motion_guard.reset();local_progress.reset()
   # Initial alignment can take seconds. Never submit a path with that old TF time.
   stamp=n.get_clock().now().to_msg()
   if approved:
@@ -339,10 +352,8 @@ def main():
    if not route_costmap.service_is_ready():raise RuntimeError('[PATH_CHECK_UNAVAILABLE] 路径代价地图服务不可用')
    route_future=route_costmap.call_async(GetCostmap.Request());route_requested=now
  def install_body_route(values,certificate):
-  nonlocal background_future,background_ready,route_cursor
+  nonlocal route_cursor
   route_cursor=0
-  if background_future is not None:background_future.cancel()
-  background_future=None;background_ready=None
   stamp=n.get_clock().now().to_msg();poses=[]
   for value in values:
    point=PoseStamped();point.header.frame_id='map';point.header.stamp=stamp
@@ -352,17 +363,40 @@ def main():
   pending_message.path.poses=poses;pending_message.path.header.stamp=stamp
   print('[REPLAN_READY] 已找到绕行路线%d点，等待最新地图复核。'%len(poses),flush=True)
   trace.emit('body_plan',**certificate)
+ def start_body_search(now,grid,points,detail,charge=False):
+  nonlocal body_future,body_context,body_repaired,body_force,search_wait_logged,route_after,deadline
+  if body_future is not None or not stopped():return False
+  start=current_pose();goal_pose=[target['x'],target['y'],target['yaw']]
+  evidence=search_gate.evidence(grid,start,goal_pose)
+  if not search_gate.begin(evidence):
+   if not search_wait_logged:
+    print('[REPLAN_WAIT_CHANGE] 同一场景已完成一次短绕行和完整搜索；等待通路、起点或目标实质变化。',flush=True)
+    trace.emit('replan_wait_change');search_wait_logged=True
+   return False
+  if charge and not replan_policy.request(now):
+   search_gate.finish();fault('[OBSTACLE_REPLAN_LIMIT] 本次受阻已达到重规划次数上限');return False
+  search_wait_logged=False;body_repaired=True;body_force=False
+  body_context=(pending_message,start)
+  body_future=body_executor.submit(timed_replan_body,grid,start,goal_pose,half_length,half_width,points,detail,root/'work/navigation'/task_id,time.monotonic())
+  route_after='prepare';transition('ROUTE_CHECK');deadline=min(execution_deadline,now+15.)
+  trace.emit('stationary_replan',charged=charge,attempts=replan_policy.attempts)
+  print('[BODY_REPLAN] 已停稳，单任务搜索机身可通行路线；主循环继续处理输入和零速输出。',flush=True)
+  return True
  def poll_route_check(now):
-  nonlocal route_cursor,route_future,route_last_valid,route_details,route_next_check,body_future,body_repaired,body_force,route_grid,pending_replan_charge,check_future,check_context
+  nonlocal route_cursor,route_future,route_last_valid,route_details,route_next_check,body_future,body_context,body_repaired,body_force,route_grid,check_future,check_context,route_timing
   if body_future is not None:
    if not body_future.done():return None
-   future=body_future;body_future=None
-   charged=pending_replan_charge;pending_replan_charge=False
+   future=body_future;body_future=None;search_gate.finish()
+   message,start=body_context;body_context=None
    try:values,certificate=future.result()
    except ValueError as e:
+    trace.emit('body_plan_timing',failed=True,**getattr(e,'timing',{}))
     route_details=dict(reason='planning_timeout' if isinstance(e,PlanningTimeout) else 'body_planning_failed',message=str(e))
-    if isinstance(e,PlanningTimeout):replan_policy.timeout(now,charged)
-    route_last_valid=False;return False
+    route_last_valid=False;route_next_check=now+1.;return False
+   current=current_pose()
+   if message is not pending_message or math.dist(current[:2],start[:2])>.15 or abs(wrap(current[2]-start[2]))>.15:
+    route_details=dict(reason='search_result_stale');route_last_valid=False;route_next_check=now+1.
+    trace.emit('body_plan_discarded',reason=route_details['reason']);return False
    install_body_route(values,certificate)
    request_route_check(now);return None
   if check_future is None:
@@ -372,7 +406,9 @@ def main():
      route_costmap.remove_pending_request(route_future);route_future=None
      raise RuntimeError('[PATH_CHECK_TIMEOUT] 代价地图检查超过3秒')
     return None
+   map_received=time.monotonic()
    m=route_future.result().map;route_future=None
+   route_timing=dict(map_response_ms=(map_received-route_requested)*1000)
    meta=m.metadata;q=meta.origin.orientation
    if m.header.frame_id!='map':raise RuntimeError('[PATH_CHECK_FRAME] 全局代价地图坐标系错误')
    grid=dict(stamp_ns=m.header.stamp.sec*10**9+m.header.stamp.nanosec,width=meta.size_x,height=meta.size_y,resolution=meta.resolution,
@@ -384,37 +420,36 @@ def main():
    points=points[route_cursor:]
    local_points,reaches_goal=bounded_route(points,pos)
    if not local_points:local_points=points[-1:]
-   check_context=(grid,points,pos,length,width,pending_message,now)
-   check_future=check_executor.submit(check_route,local_points,pos,grid,length,width,target['yaw'] if reaches_goal else None)
+   submitted=time.monotonic();route_timing['prepare_copy_ms']=(submitted-map_received)*1000
+   check_context=(grid,points,pos,length,width,pending_message,submitted)
+   check_future=check_executor.submit(timed_check_route,local_points,pos,grid,length,width,target['yaw'] if reaches_goal else None,submitted)
    return None
   if not check_future.done():return None
   future=check_future;check_future=None
   grid,points,pos,length,width,message,started=check_context;check_context=None
   ok,details=future.result()
+  timing=dict(route_timing,**details.get('timing',{}),total_ms=(time.monotonic()-route_requested)*1000)
+  trace.emit('path_check_timing',**timing)
   current=current_pose()
   if (message is not pending_message or now-started>1.5 or
       math.hypot(current[0]-pos[0],current[1]-pos[1])>.15 or abs(wrap(current[2]-pos[2]))>.15):
    route_last_valid=None;request_route_check(now);return None
   route_grid=grid;route_details=details
-  if state=='ROUTE_CHECK' and route_after!='resume' and not body_repaired and (body_force or not ok):
-   body_repaired=True;body_force=False
-   body_future=body_executor.submit(replan_body,grid,current_pose(),[target['x'],target['y'],target['yaw']],length,width,points,route_details,root/'work/navigation'/task_id)
-   print('[BODY_REPLAN] 搜索机身可通行且远离墙角的路线，保持停车。',flush=True)
-   return None
-  route_last_valid=ok;route_next_check=time.monotonic()+(.20 if near_block and state=='OBSTACLE_WAIT' else 1.);trace.emit('path_check',valid=ok,details=route_details)
+  if state=='ROUTE_CHECK' and route_after not in ('resume','controller_review') and not body_repaired and (body_force or not ok):
+   if start_body_search(now,grid,points,route_details):return None
+   ok=False;route_details=dict(route_details,reason='search_wait_change')
+  route_last_valid=ok;route_next_check=time.monotonic()+1.;trace.emit('path_check',valid=ok,details=route_details)
   return ok
  def queue_route_check(after='prepare',force_plan=False):
-  nonlocal route_after,route_future,route_last_valid,deadline,body_future,body_repaired,body_force,background_future,background_ready,check_future,check_context
+  nonlocal route_after,route_future,route_last_valid,deadline,body_future,body_repaired,body_force,check_future,check_context
   if check_future is not None:check_future.cancel();check_future=None;check_context=None
-  if body_future is not None:body_future.cancel();body_future=None
+  # An executing process cannot be canceled: keep its handle until completion.
   body_repaired=False;body_force=force_plan
   if not approved:
    dispatch_route();return
   if route_future is not None:route_costmap.remove_pending_request(route_future);route_future=None
   route_after=after;route_last_valid=None;transition('ROUTE_CHECK');deadline=min(execution_deadline,time.monotonic()+15.)
-  if background_future is not None:background_future.cancel();background_future=None
-  background_ready=None
-  request_route_check(time.monotonic())
+  if body_future is None:request_route_check(time.monotonic())
  def submit_route():queue_route_check('submit')
  def restart_interrupted_check(now):
   nonlocal route_future,check_future,check_context,route_last_valid,route_next_check
@@ -444,38 +479,39 @@ def main():
    transition('ALIGN_PATH');align_halt_at=None
    print('[ALIGN_PATH] 路线机身检查通过，先对准起步方向 %.3frad。'%heading,flush=True)
   else:dispatch_route()
- def obstacle_hold(reason,now,force=False,near=False):
-  nonlocal near_block,check_future,check_context
+ def obstacle_hold(reason,now,force=False,confirmed=False,command=None):
+  nonlocal check_future,check_context,block_confirmed,blocked_command
   nonlocal obstacle_at,obstacle_force_replan,deadline,terminal,route_future,route_next_check,route_last_valid
   if state=='OBSTACLE_WAIT':return
-  near_block=near;clear_window.reset()
+  clear_window.reset();obstacle_inputs.reset();local_progress.reset();block_confirmed=confirmed;blocked_command=command
   zero();obstacle_at=now;obstacle_force_replan=force;replan_policy.blocked(now);replan_policy.progress(now,0.,False)
   if route_future is not None:route_costmap.remove_pending_request(route_future);route_future=None
   if check_future is not None:check_future.cancel();check_future=None;check_context=None
   route_last_valid=None;route_next_check=now;stop_sequences.clear()
   if goal is None and (route_reply is None or route_reply.done()):terminal=True
-  transition('OBSTACLE_WAIT',reason);deadline=min(execution_deadline,now+20.)
-  print('[OBSTACLE_WAIT] '+reason+('；近段受阻，停车观察最多%g秒，当前路线恢复即可继续。'%near_wait if near else '；撤销控制，停稳后复核。'),flush=True)
+  transition('OBSTACLE_WAIT',reason);deadline=execution_deadline
+  print('[OBSTACLE_WAIT] '+reason+'；零速确认受阻，单任务按需重规划；未变化的无解场景不周期搜索。',flush=True)
  def pause_inputs(reason,now,category='data'):
-  nonlocal state,paused_state,deadline,stable_since,paused_sequence,paused_stamp,paused_at,pause_category,check_future,check_context
+  nonlocal state,paused_state,deadline,paused_sequence,paused_stamp,paused_at,pause_category,check_future,check_context
   zero()
-  if state=='INPUT_PAUSE':return
+  input_window.reset();obstacle_inputs.reset();local_progress.reset()
+  if state=='INPUT_PAUSE':budget.set_phase(now,'input_unavailable');return
   if check_future is not None:check_future.cancel();check_future=None;check_context=None
   pause_category=category;budget.begin_wait(now,category)
   clear_window.reset()
-  paused_state=state;transition('INPUT_PAUSE',reason);stable_since=None
+  paused_state=state;transition('INPUT_PAUSE',reason)
   paused_at=now;motion_guard.reset();settled_review.reset();replan_policy.progress(now,0.,False)
   paused_sequence=sdk.get('state_sequence');paused_stamp=loc.get('source_stamp')
   deadline=min(execution_deadline,now+30.)
   if goal and not terminal:goal.cancel_goal_async()
-  print('[INPUT_PAUSE] %s；立即保持零速，取消旧路线；最多等待30秒，要求新数据稳定0.5秒并停稳后恢复，总时限不重置。' % reason,flush=True)
+  print('[INPUT_PAUSE] %s；立即保持零速，取消旧路线；最多等待30秒，要求两个新数据样本稳定%.2f秒并停稳后恢复，总时限不重置。' % (reason,policy['recovery_stable_sec']),flush=True)
  def base_safe(now):
   return (now-sdk_at<.4 and all(sdk.get(k) is True for k in ('sdk_connected','control_held','state_fresh'))
    and all(sdk.get(k) is False for k in ('soft_stop','hardware_stop'))
    and isinstance(sdk.get('state_age_sec'),(int,float)) and 0<=sdk['state_age_sec']<2)
  def localization_safe(now):
   if loc.get('map_id')!=map_id: return False
-  if not (now-loc_at<.4 and loc.get('ready') is True and now-pose_at<.4 and now-scan_at<.5 and now-odom_at<.4 and now-health_at<.5 and scan_input_state(scanhealth)[0]): return False
+  if not (now-loc_at<.4 and loc.get('ready') is True and now-pose_at<.4 and source_fresh(n.get_clock().now().nanoseconds*1e-9,scan_stamp,policy) and now-odom_at<.4 and now-health_at<.5 and scan_input_state(scanhealth)[0]): return False
   if pose is None: return False
   return True
  def at_target():
@@ -528,8 +564,9 @@ def main():
    alignment=None;approach_attempted=False;terminal_started=None
    yaw_priority_latched=False;yaw_attempts=0;turn_replan_route=True
  def turn_clear(now):
-  nonlocal next_turn_check_log
+  nonlocal next_turn_check_log,turn_state
   if not costmap_fresh(now):
+   turn_state='DATA_UNAVAILABLE'
    return '局部代价地图超过0.5秒未更新，禁止终点转向'
   delta=wrap(alignment.target[2]-current_pose()[2])
   footprint=json.loads(body['footprint'])
@@ -539,6 +576,8 @@ def main():
   margin=turn_drift_margin(max(abs(delta),abs(coast)))
   details=dict(turn_drift_margin_m=margin)
   reason=swept_rotation_clearance(costmap,current_odom(),delta,half_length+margin,half_width+margin,details,coast_delta=coast)
+  cell=details.get('blocked_cell')
+  turn_state='CLEAR' if not reason else 'BLOCKED' if cell is not None and cell[-1]>=99 else 'DATA_UNAVAILABLE'
   if reason or now>=next_turn_check_log:
    print('[TURN_CHECK] '+json.dumps(dict(phase=state,**details),ensure_ascii=False),flush=True)
    next_turn_check_log=now+1.
@@ -558,6 +597,13 @@ def main():
   return reason
  def costmap_fresh(now):
   return costmap is not None and now-costmap_at<.5 and -.05<stamp_age(costmap.header)<.5
+ def current_motion_check(command):
+  if not costmap_fresh(time.monotonic()) or odom is None or scan_stamp is None:
+   return 'DATA_UNAVAILABLE',dict(reason='local map/odometry/scan unavailable')
+  t=odom.twist.twist
+  return stopping_sweep(local_grid,current_odom(),command,(t.linear.x,t.linear.y,t.angular.z),half_length,half_width,
+                        max(0.,n.get_clock().now().nanoseconds*1e-9-scan_stamp),
+                        replan_cfg['stop_reaction_sec'],stop_decel,stop_angular_decel)
  def output(vx,wz,now):
   nonlocal next_control_log,last_sent
   t=odom.twist.twist
@@ -618,7 +664,7 @@ def main():
     if not base_safe(now):fault('[SDK_NOT_READY] '+str(sdk.get('reason')));continue
     if loc.get('tracking_fault'):fault('[ODOMETRY_FAULT] '+loc['tracking_fault']);continue
     loc_ok=localization_safe(now)
-    if not loc_ok or tf_block:
+    if not loc_ok or tf_block or (state in ('NAVIGATE','ACCEPT','OBSTACLE_WAIT','INPUT_PAUSE') and not costmap_fresh(now)):
      # Flat arrival is XY/yaw/stationary only. Height and tilt are diagnostics.
      scan_ok,scan_wait,scan_reason=scan_input_state(scanhealth)
      recoverable=(loc.get('map_id')==map_id and loc.get('mode') in ('FUSED','ODOM_ONLY','LOST')
@@ -626,21 +672,26 @@ def main():
                   and '不一致' not in tf_block)
      why='TF=%s localization=%s scan_ready=%s scan_reason=%s scan_recoverable=%s map_ok=%s ages(loc/pose/scan/odom/health)=%s' % (tf_block,loc.get('reason'),scan_ok,scan_reason,scan_wait,loc.get('map_id')==map_id,[round(now-v,3) for v in (loc_at,pose_at,scan_at,odom_at,health_at)])
      if recoverable and (state in RECOVERABLE_INPUT_PHASES or state in ('ROUTE_CHECK','OBSTACLE_WAIT')):
-      pause_inputs(why,now);stable_since=None;continue
+      pause_inputs(why,now);continue
      fault('[LOCALIZATION_NOT_READY] '+why);continue
     if state=='INPUT_PAUSE':
      zero()
-     if not stopped() or sdk.get('state_sequence')==paused_sequence or loc.get('source_stamp')==paused_stamp or not costmap_fresh(now):stable_since=None;continue
-     if stable_since is None:stable_since=now
-     if now-stable_since<.5:continue
-     if route_reply is not None and not route_reply.done():continue
-     if goal and not terminal and (result is None or not result.done()):continue
-     print('[INPUT_RECOVERED] 新数据连续稳定0.5秒、机器人已停稳，恢复前复核完成。',flush=True)
+     footprint_state,_=current_motion_check((0.,0.))
+     fresh=costmap_fresh(now) and footprint_state!='DATA_UNAVAILABLE' and sdk.get('state_sequence')!=paused_sequence and loc.get('source_stamp')!=paused_stamp
+     stable=input_window.observe(now,(scan_stamp,loc.get('source_stamp'),sdk.get('state_sequence')),fresh)
+     if not fresh:budget.set_phase(now,'input_unavailable');continue
+     if not stopped():budget.set_phase(now,'settling');continue
+     if not stable:budget.set_phase(now,'source_confirmation');continue
+     if route_reply is not None and not route_reply.done():budget.set_phase(now,'action_release');continue
+     if goal and not terminal and (result is None or not result.done()):budget.set_phase(now,'action_release');continue
+     print('[INPUT_RECOVERED] 新源样本稳定%.2f秒、机器人已停稳，旧动作已结束。'%policy['recovery_stable_sec'],flush=True)
      budget.end_wait(now);deadline=execution_deadline
      if paused_state in ('NAVIGATE','ACCEPT'):
       terminal=True;goal=None;result=None
       if pause_category=='data':
-       trim_current_route();queue_route_check('resume')
+       trim_current_route()
+       if footprint_state=='BLOCKED':obstacle_hold('[LOCAL_FOOTPRINT_BLOCKED] 恢复时当前机身仍受阻',now,command=(0.,0.))
+       else:dispatch_route()  # Existing route; DWB chooses a fresh local connection.
       else:reacquire('运动反馈异常恢复，重新检查起步',now,category=pause_category,charged=pause_category=='motion')
      else:
       transition(paused_state)
@@ -649,7 +700,7 @@ def main():
       if state in ('STOPPING','REACQUIRE_STOP'):halt_at=now;deadline=min(execution_deadline,now+10);stop_sequences.clear()
       if state in ('REPLAN','ROUTE_CHECK'):deadline=min(execution_deadline,now+10)
       if state=='ROUTE_CHECK':restart_interrupted_check(now)
-      if state=='OBSTACLE_WAIT':deadline=min(execution_deadline,now+20)
+      if state=='OBSTACLE_WAIT':deadline=execution_deadline;obstacle_at=now;block_confirmed=False
      continue
    if state=='WAIT':
     zero()
@@ -704,7 +755,9 @@ def main():
     zero()
     valid=poll_route_check(now)
     if valid is None:continue
-    if not valid:obstacle_hold('[PATH_FOOTPRINT_BLOCKED] '+json.dumps(route_details),now,near=route_details.get('clear_prefix_m',math.inf)<1.2);continue
+    if route_after=='controller_review' and valid:
+     fault('[CONTROLLER_FAILED_UNKNOWN] Humble FollowPath未提供错误码；最新路线未发现障碍，禁止盲目重试');continue
+    if not valid:obstacle_hold('[PATH_FOOTPRINT_BLOCKED] '+json.dumps(route_details),now,force=True,confirmed=True);continue
     deadline=execution_deadline
     if route_after in ('resume','prepare'):prepare_route()
     else:dispatch_route()
@@ -717,51 +770,45 @@ def main():
       continue
      terminal=True
     if not stopped() or not costmap_fresh(now):
-     clear_window.reset();stop_sequences.clear();continue
+     clear_window.reset();obstacle_inputs.reset();stop_sequences.clear();continue
+    obstacle_inputs.observe(now,(scan_stamp,loc.get('source_stamp'),sdk.get('state_sequence')))
     stop_sequences.add(sdk.get('state_sequence'))
-    if len(stop_sequences)<2 or now-obstacle_at<.7:continue
-    if background_ready is not None and not near_block:
-     values,certificate=background_ready;background_ready=None
-     terminal=True;goal=None;result=None
-     install_body_route(values,certificate)
-     queue_route_check('prepare');continue
+    if len(stop_sequences)<2:continue
     if turn_wait is not None:
      if now<turn_wait.next_check:continue
-     turn_wait.next_check=now+.25
+     turn_wait.next_check=now+.20
      blocked=turn_clear(now)
+     if turn_state=='DATA_UNAVAILABLE':pause_inputs('[TURN_DATA_UNAVAILABLE] '+blocked,now);continue
      decision=turn_wait.update(now,bool(blocked),True)
      if decision=='WAIT':continue
      if decision=='RESUME':
       previous=turn_wait.phase
       alignment=begin_alignment(current_pose(),turn_wait.target,now,current_odom(),check_goal_position=previous=='ALIGN_YAW')
       turn_wait=None;obstacle_force_replan=False;replan_policy.since=None;motion_guard.reset()
-      transition(previous,'[TURN_CLEARED] 障碍已消退，矩形转向检查连续通过，恢复转向')
+      transition(previous,'[TURN_CLEARED] 最新转向包络通过，恢复转向')
       deadline=execution_deadline;align_halt_at=None;continue
-     turn_wait=None;turn_replan_route=True
+     turn_wait=None;turn_replan_route=True;block_confirmed=True
      yaw_priority_latched=False;terminal_started=None;approach_attempted=False
-     print('[TURN_REPLAN] 转向持续受阻，重新搜索包含终点朝向的可执行路线；不会原地强转。',flush=True)
-    if route_future is None and now>=route_next_check:request_route_check(now)
+     print('[TURN_REPLAN] 转向受阻确认，按需搜索包含终点朝向的路线。',flush=True)
+    if blocked_command is not None and not obstacle_force_replan:
+     local_state,local_motion_details=current_motion_check(blocked_command)
+     if local_state=='DATA_UNAVAILABLE':pause_inputs(str(local_motion_details),now);continue
+     recovered=clear_window.classify(now,costmap.header.stamp.sec*10**9+costmap.header.stamp.nanosec,scan_stamp,local_state=='CLEAR')
+     if recovered=='CLEAR_CONFIRMED':
+      terminal=True;goal=None;result=None;trim_current_route();dispatch_route()
+      print('[OBSTACLE_CLEARED] 当前运动包络恢复，交给DWB继续局部绕行。',flush=True);continue
+     if recovered=='CLEAR_PENDING':continue
+    if route_future is None and check_future is None and now>=route_next_check:request_route_check(now)
     checked=poll_route_check(now)
-    if checked is None and (route_future is not None or check_future is not None):continue
-    clear=route_last_valid
-    if near_block:
-     if checked is None:continue
-     clear=clear_window.observe(time.monotonic(),route_grid['stamp_ns'],scan_stamp,checked)
-    if clear is True and not obstacle_force_replan:
-     background_ready=None;replan_policy.since=None;terminal=True;goal=None;result=None
-     trim_current_route()
-     print('[OBSTACLE_CLEARED] 路线已重新通过机身检查，恢复前复核起步朝向。',flush=True)
-     queue_route_check('resume' if near_block else 'prepare');continue
-    if near_block and near_obstacle_action(now-obstacle_at,near_wait,clear)!='replan':continue
-    if near_block and background_ready is not None:
-     values,certificate=background_ready;background_ready=None
-     terminal=True;goal=None;result=None;install_body_route(values,certificate)
-     queue_route_check('prepare');continue
-    if (near_block or now-obstacle_at>=3.) and replan_policy.ready(now):
-     if not replan_policy.request(now):fault(f'[OBSTACLE_REPLAN_LIMIT] 本次受阻连续{replan_policy.max_attempts}次重规划仍未取得有效前进，已停车；此前已成功行走的阶段不累计');continue
-     print('[OBSTACLE_REPLAN] 本次连续受阻第%d/%d次重规划；恢复有效前进后清零。'%(replan_policy.attempts,replan_policy.max_attempts),flush=True)
-     pending_replan_charge=True
-     terminal=True;reacquire('[DYNAMIC_REPLAN] '+json.dumps(route_details),now,category='data')
+    if checked is None:continue
+    if checked and not obstacle_force_replan and blocked_command is None:
+     if obstacle_inputs.confirmed(now):
+      terminal=True;goal=None;result=None;trim_current_route();prepare_route()
+      print('[OBSTACLE_CLEARED] 新地图确认原路线恢复。',flush=True)
+     continue
+    if not block_confirmed and now-obstacle_at<replan_cfg['local_unavailable_sec']:continue
+    points=[[p.pose.position.x,p.pose.position.y] for p in pending_message.path.poses[route_cursor:]]
+    start_body_search(now,route_grid,points,route_details,charge=True)
    elif state in ('NAVIGATE','ACCEPT'):
     if sdk.get('motion')!='Walk' or sdk.get('motion_pending') is not False: fault('Walk mode lost'); continue
     pos=current_pose()
@@ -772,44 +819,17 @@ def main():
      transition('STOPPING');deadline=min(execution_deadline,now+10);halt_at=now
      print('[YAW_PRIORITY] 进入25cm终点闭环范围；停止平移并撤销DWB，等待动作结束和停稳后对齐朝向。',flush=True)
      continue
-    if approved and state=='NAVIGATE' and not (result and result.done()):
-     if route_future is None and now>=route_next_check:request_route_check(now)
-     valid=poll_route_check(now)
-     if valid is False:
-      if route_details.get('clear_prefix_m',0.)>replan_radius:
-       if replan_policy.since is None:replan_policy.since=now
-      else:replan_policy.blocked(now)
-      if route_details.get('clear_prefix_m',0.)<1.2:
-       obstacle_hold('[PATH_FOOTPRINT_BLOCKED] '+json.dumps(route_details),now,near=True);continue
-      observation_sec=5. if route_details.get('clear_prefix_m',0.)>replan_radius else 3.
-      if background_future is None and background_ready is None and now>=background_retry_at and replan_policy.ready(now) and now-replan_policy.since>=observation_sec:
-       footprint=json.loads(body['footprint'])
-       background_future=body_executor.submit(replan_body,route_grid,current_pose(),[target['x'],target['y'],target['yaw']],
-        max(abs(p[0]) for p in footprint)+padding,max(abs(p[1]) for p in footprint)+padding,
-        [[p.pose.position.x,p.pose.position.y] for p in pending_message.path.poses[route_cursor:]],route_details,root/'work/navigation'/task_id)
-       background_retry_at=now+5.
-       print('[DISTANT_OBSTACLE] 障碍持续存在，近段已通过机身复核，后台搜索备选路线。',flush=True)
-     elif valid is True:
-      replan_policy.cleared();background_ready=None
-     if background_future is not None and background_future.done():
-      try:background_ready=background_future.result()
-      except ValueError as e:
-       print('[BACKGROUND_PLAN_RETRY] '+str(e),flush=True);background_retry_at=now+5.
-      background_future=None
-      if route_last_valid is True:background_ready=None
-     if valid is False and background_ready is not None and route_details.get('clear_prefix_m',0.)<=replan_radius:
-       obstacle_hold('[BACKGROUND_ROUTE_READY] 已找到候选绕行路线，停车切换并按最新地图认证',now,force=True);continue
-     if replan_policy.progress(now,math.hypot(pos[0]-target['x'],pos[1]-target['y']),valid=route_last_valid is True):
-      print('[REPLAN_EPISODE_RESET] 连续恢复行走且向目标推进0.5m，清零本次受阻计数。',flush=True)
-     if (route_future is not None or check_future is not None) and now-route_requested>1.5:
-      obstacle_hold('[PATH_CHECK_DELAY] 路径复核延迟，先停稳等待',now);continue
     if result and result.done():
      terminal=True
      if result.result().status!=GoalStatus.STATUS_SUCCEEDED:
       response=result.result();detail=response.result
       code=getattr(detail,'error_code',None)
-      if approved and code in (104,105,106):
-       obstacle_hold('[CONTROLLER_BLOCKED] error_code='+str(code),now,force=True);continue
+      decision=follow_path_failure(detail)
+      trace.emit('controller_failure',status=response.status,error_code=code,decision=decision)
+      if approved and response.status==GoalStatus.STATUS_ABORTED and decision=='REVIEW':
+       zero();queue_route_check('controller_review');continue
+      if approved and response.status==GoalStatus.STATUS_ABORTED and decision=='BLOCKED':
+       obstacle_hold('[CONTROLLER_BLOCKED] error_code='+str(code),now,force=True,confirmed=True);continue
       fault('[CONTROLLER_FAILED] Nav2 status=%s error_code=%s message=%s；详见 work/navigation_nav2.log' % (response.status,getattr(detail,'error_code','unavailable'),getattr(detail,'error_msg','unavailable')));continue
      pos=current_pose()
      if math.hypot(pos[0]-target['x'],pos[1]-target['y'])>POSITION_RELEASE:
@@ -818,14 +838,29 @@ def main():
      transition('STOPPING');deadline=min(execution_deadline,now+10);halt_at=now;zero()
      print('[PATH_BRAKE] 路径跟踪结束；先在零指令下确认停稳，再独立调整最终朝向。',flush=True)
      continue
-    if state=='NAVIGATE' and raw is not None and now-raw_at<.15:
+    if state=='NAVIGATE' and raw is not None and now-raw_at<.15 and raw_controller is not None and now-controller_at<.15:
      values=(raw.linear.x,raw.linear.y,raw.linear.z,raw.angular.x,raw.angular.y,raw.angular.z)
+     controller_values=(raw_controller.linear.x,raw_controller.linear.y,raw_controller.linear.z,raw_controller.angular.x,raw_controller.angular.y,raw_controller.angular.z)
+     if not all(math.isfinite(v) for v in controller_values) or not -1e-6<=controller_values[0]<=MAX_LINEAR_SPEED+1e-6 or any(abs(v)>1e-6 for v in controller_values[1:5]) or abs(controller_values[5])>MAX_ANGULAR_SPEED+1e-6:
+      fault('[INVALID_DWB_COMMAND] DWB速度无效或超出已配置运动范围');continue
      if not all(math.isfinite(v) for v in values) or not -1e-6<=raw.linear.x<=MAX_LINEAR_SPEED+1e-6 or any(abs(v)>1e-6 for v in values[1:5]):
       fault('unsupported Nav2 velocity: linear=(%.4f, %.4f, %.4f) angular=(%.4f, %.4f, %.4f)' % values); continue
      command_missing_at=None;first_command_seen=True
-     output(max(0.,min(MAX_LINEAR_SPEED,raw.linear.x)),max(-MAX_ANGULAR_SPEED,min(MAX_ANGULAR_SPEED,raw.angular.z)),now)
+     command=(max(0.,min(MAX_LINEAR_SPEED,raw.linear.x)),max(-MAX_ANGULAR_SPEED,min(MAX_ANGULAR_SPEED,raw.angular.z)))
+     # DWB failure_tolerance publishes fresh zeros; do not keep a smoother's old
+     # nonzero tail alive for that tolerance interval.
+     if abs(raw_controller.linear.x)+abs(raw_controller.angular.z)<1e-6:command=(0.,0.)
+     motion_state,local_motion_details=current_motion_check(command)
+     if motion_state=='DATA_UNAVAILABLE':pause_inputs('[LOCAL_DATA_UNAVAILABLE] '+str(local_motion_details),now);continue
+     if motion_state=='BLOCKED':obstacle_hold('[STOPPING_ENVELOPE_BLOCKED] '+str(local_motion_details),now,command=command);continue
+     progress=local_progress.update(now,current_odom(),command)
+     if local_progress.last_progress:progress_distance+=replan_cfg['progress_distance_m']
+     replan_policy.progress(now,-progress_distance,valid=progress=='ADVANCE')
+     if progress in ('NO_LOCAL_MOTION','NO_PROGRESS'):
+      obstacle_hold('['+progress+'] DWB持续无可用运动或净位移不足',now,force=True,confirmed=True);continue
+     output(*command,now)
     else:
-     zero()
+     zero();local_progress.reset()
      if state=='NAVIGATE':
       if command_missing_at is None:
        command_missing_at=now
@@ -866,8 +901,14 @@ def main():
      transition('STOPPING');deadline=min(execution_deadline,now+10);halt_at=now;stop_sequences.clear();settled_review.reset();zero();continue
     reason=turn_clear(now)
     if reason:
-     turn_wait=TurnWait(state,alignment.target,now,timeout=near_wait)
-     obstacle_hold('[TURN_BLOCKED] '+reason,now,force=True)
+     if turn_state=='DATA_UNAVAILABLE':pause_inputs('[TURN_DATA_UNAVAILABLE] '+reason,now);continue
+     static_block=False
+     if static_map is not None:
+      detail={};delta=wrap(alignment.target[2]-current_pose()[2]);margin=turn_drift_margin(delta)
+      swept_rotation_clearance(static_map,current_pose(),delta,half_length+margin,half_width+margin,detail)
+      static_block=(detail.get('blocked_cell') or [0,0,0])[-1]==100
+     turn_wait=TurnWait(state,alignment.target,now,timeout=0. if static_block else replan_cfg['local_unavailable_sec'],stable_sec=policy['recovery_stable_sec'])
+     obstacle_hold('[STATIC_TURN_BLOCKED] '+reason if static_block else '[TURN_BLOCKED] '+reason,now,force=True,confirmed=static_block)
      continue
     align_halt_at=None
     output(0.,wz,now)
@@ -960,7 +1001,6 @@ def main():
  except Exception as e:
   fault(type(e).__name__+': '+str(e));print('FAULT: '+failed,flush=True)
  finally:
-  if background_future is not None:background_future.cancel()
   if body_future is not None:body_future.cancel()
   if check_future is not None:check_future.cancel()
   check_executor.shutdown(wait=False,cancel_futures=True)

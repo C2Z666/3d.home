@@ -1,0 +1,8 @@
+# Shared batch-A policy. Source age is measured at acquisition, never receipt.
+observation_source_max_age_sec: 0.60
+future_tolerance_sec: 0.05
+recovery_stable_sec: 0.20
+visual_steady_hz: 0.5
+visual_burst_hz: 2.0
+visual_burst_sec: 5.0
+visual_consistency_sec: 3.0

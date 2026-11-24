@@ -24,7 +24,7 @@ controller_server:
     min_x_velocity_threshold: 0.001
     min_y_velocity_threshold: 0.001
     min_theta_velocity_threshold: 0.001
-    failure_tolerance: 1.0
+    failure_tolerance: 2.0
     publish_zero_velocity: true
     progress_checker_plugin: progress_checker
     goal_checker_plugins:
@@ -80,13 +80,13 @@ controller_server:
       - GoalAlign
       - PathDist
       - GoalDist
-      PathAlign.scale: 24.0
+      PathAlign.scale: 16.0
       PathAlign.forward_point_distance: 0.15
       GoalAlign.scale: 16.0
       GoalAlign.forward_point_distance: 0.15
       BaseObstacle.scale: 0.05
       ObstacleFootprint.scale: 0.05
-      PathDist.scale: 16.0
+      PathDist.scale: 12.0
       GoalDist.scale: 24.0
       Oscillation.oscillation_reset_dist: 0.05
       Oscillation.oscillation_reset_angle: 0.2
@@ -137,7 +137,7 @@ global_costmap:
           min_obstacle_height: -0.5
           max_obstacle_height: 1.1
           observation_persistence: 2.0
-          expected_update_rate: 0.5
+          # Injected from navigation_policy.yaml by both launch files (seconds).
         free_rays:
           topic: /d1/nav/clearing_points
           sensor_frame: d1_nav_lidar_origin
@@ -202,7 +202,7 @@ local_costmap:
           min_obstacle_height: -0.5
           max_obstacle_height: 1.1
           observation_persistence: 2.0
-          expected_update_rate: 0.5
+          # Injected from navigation_policy.yaml by both launch files (seconds).
         free_rays:
           topic: /d1/nav/clearing_points
           sensor_frame: d1_nav_lidar_origin

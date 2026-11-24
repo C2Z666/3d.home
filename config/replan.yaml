@@ -1,6 +1,8 @@
-# Distance along the verified route before handing off to a detour.
-replan_radius_m: 3.0
-# Maximum observation wait for a blocked near segment.
-near_obstacle_wait_sec: 5.0
-# Maximum counted replans during one uninterrupted blockage.
+# Batch B: DWB gets a local avoidance opportunity before stationary planning.
+local_unavailable_sec: 2.0
+no_progress_sec: 3.0
+progress_distance_m: 0.10
+# Additional command/bridge response time; source age is added separately.
+stop_reaction_sec: 0.20
+# Per blockage episode; identical failed scenes are not periodically retried.
 max_replan_attempts: 8
