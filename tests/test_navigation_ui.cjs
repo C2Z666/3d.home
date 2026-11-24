@@ -36,6 +36,13 @@ const init=()=>run("state={navigation_ready:true};online=true;navigationOnline=t
  assert.equal(run('lines.length'),0,'Arrival line hidden outside selected route');
  run("previewPath={mission:{connections:[conn]}};drawConnections()");
  assert.equal(run("lines.filter(v=>v.c==='#008c83').length"),1,'Arrival line shown for planned stair');
+ run("scene='old';floor='upper';state={map_id:'m1',maps:{lower:{width:10},upper:{width:20}}};mapIdentityKey='';mapAssetKey='';updateMapAssets();goal={x:3,y:4,yaw:0};previewPath={plan_id:'cross-floor',floor:'lower',points:[[0,0],[1,1]],floor_reference_paths:[{floor:'upper',points:[[2,2],[3,3]]}]};var beforeRevision=goalRevision;floor='lower';updateMapAssets()");
+ assert.equal(run('previewPath.plan_id'),'cross-floor','Changing the viewed floor preserves the preview');
+ assert.equal(run('goal.x'),3,'Changing the viewed floor preserves the goal');
+ assert.equal(run('goalRevision'),run('beforeRevision'),'Changing floor does not invalidate confirmation');
+ run("floor='upper';updateMapAssets()");assert.equal(run('previewPath.plan_id'),'cross-floor');
+ run("state.map_id='m2';updateMapAssets()");assert.equal(run('previewPath'),null,'Changing map identity invalidates the preview');
+ run("previewPath={plan_id:'stale'};state.maps.upper.width=21;updateMapAssets()");assert.equal(run('previewPath'),null,'Changing map geometry invalidates the preview');
  init();await el('resetWalk').onclick();
  assert.equal(posts.at(-1).url,'/navigation/walk-reset');assert.equal(posts.at(-1).body.confirmed,true);
  console.log('PASS: confirmation, cancel, runtime/radians, duplicate prevention, stale goal, stop task binding, disconnect.');

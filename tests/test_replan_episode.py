@@ -1,11 +1,48 @@
-import sys,unittest
+import sys,unittest,ast,copy
+from unittest.mock import Mock
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
-from route_validation import ReplanPolicy,check_route,near_obstacle_action,ClearWindow
+from route_validation import ReplanPolicy,check_route,bounded_route,near_obstacle_action,ClearWindow
 from body_planner import PlanningTimeout,remaining_points,progress_index,tracking_suffix
 import numpy as np,pickle
 
 class Episodes(unittest.TestCase):
+ def test_resume_restarts_canceled_check_with_fresh_map(self):
+  source=Path(__file__).resolve().parents[1]/'scripts/navigate_to_goal.py'
+  tree=ast.parse(source.read_text())
+  function=copy.deepcopy(next(n for n in ast.walk(tree) if isinstance(n,ast.FunctionDef) and n.name=='restart_interrupted_check'))
+  # Execute the production recovery function with fake ROS futures/services.
+  function.body=[ast.Global(n.names) if isinstance(n,ast.Nonlocal) else n for n in function.body]
+  module=ast.fix_missing_locations(ast.Module(body=[function],type_ignores=[]))
+  for pending_map in (None,Mock()):
+   for pending_check in (None,Mock()):
+    for body in (None,Mock()):
+     request=Mock();costmap=Mock()
+     env=dict(route_future=pending_map,check_future=pending_check,check_context=('old',),
+              route_last_valid=True,route_next_check=100.,body_future=body,
+              request_route_check=request,route_costmap=costmap)
+     exec(compile(module,str(source),'exec'),env)
+     env['restart_interrupted_check'](10.)
+     self.assertIsNone(env['route_last_valid']);self.assertIsNone(env['check_context'])
+     self.assertIsNone(env['route_future']);self.assertIsNone(env['check_future'])
+     self.assertEqual(env['route_next_check'],10.)
+     if body is None:request.assert_called_once_with(10.)
+     else:request.assert_not_called()
+     if pending_map is not None:costmap.remove_pending_request.assert_called_once_with(pending_map)
+     if pending_check is not None:pending_check.cancel.assert_called_once()
+     if pending_map is not None:pending_map.reset_mock()
+     if pending_check is not None:pending_check.reset_mock()
+ def test_bounded_route_preserves_turns_and_distance(self):
+  points,complete=bounded_route([[1,0],[1,1],[1,3]],[0,0,0])
+  self.assertEqual(points,[[1.,0.],[1.,1.],[1.,2.]])
+  self.assertFalse(complete)
+ def test_bounded_route_limits_points_without_skipping(self):
+  source=[[i*.01,0] for i in range(1,201)]
+  points,complete=bounded_route(source,[0,0,0])
+  self.assertEqual(points,source[:80]);self.assertFalse(complete)
+ def test_bounded_route_detects_goal_in_range(self):
+  points,complete=bounded_route([[1,0],[1,1]],[0,0,0])
+  self.assertEqual(points,[[1.,0.],[1.,1.]]);self.assertTrue(complete)
  def test_background_path_does_not_turn_back_to_passed_waypoint(self):
   points,index=remaining_points([[0,0],[.1,0],[.2,0]],[.04,0,0])
   self.assertEqual(index,1);self.assertGreater(points[0,0],.04)

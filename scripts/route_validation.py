@@ -2,6 +2,31 @@
 import math
 from body_planner import certify
 
+def bounded_route(points, current, distance_limit=3., point_limit=80):
+    """Keep the contiguous route prefix without skipping intermediate bends."""
+    if distance_limit <= 0 or point_limit < 1:
+        raise ValueError('invalid route check limits')
+    result = []
+    previous = (float(current[0]), float(current[1]))
+    distance = 0.
+    for point in points:
+        x, y = float(point[0]), float(point[1])
+        segment = math.hypot(x-previous[0], y-previous[1])
+        if segment < 1e-9:
+            continue
+        remaining = distance_limit-distance
+        if segment > remaining:
+            fraction = remaining/segment
+            result.append([previous[0]+fraction*(x-previous[0]), previous[1]+fraction*(y-previous[1])])
+            return result, False
+        result.append([x,y])
+        distance += segment
+        previous = (x,y)
+        if len(result) >= point_limit or distance >= distance_limit:
+            return result, False
+    return result, True
+
+
 def check_route(points,current,grid,half_length=.50,half_width=.275,goal_yaw=None):
     return certify(points,current,grid,half_length,half_width,goal_yaw=goal_yaw)
 
